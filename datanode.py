@@ -28,8 +28,7 @@ def tx_util_info(client, conn, cpu_util, rxbytes_per_s, txbytes_per_s):
             'tx': txbytes_per_s,
             'cpu': cpu_util}
     conn.send(log)
-    response = client.recv()
-    print response
+    #response = client.recv()
     return
 
 if __name__ == "__main__":
