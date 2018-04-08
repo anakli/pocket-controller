@@ -1,4 +1,4 @@
-##############  Pocket controller  ####################
+##############  Pocket resource utilization daemon  ####################
 
 from jsonsocket import Client
 import time
@@ -23,7 +23,7 @@ def get_net_bytes(rxbytes, txbytes) :
 
 def tx_util_info(client, conn, cpu_util, rxbytes_per_s, txbytes_per_s):
     log = {'timestamp': time.time(),
-            'datanodeid': socket.gethostname(),
+            'datanodeid': socket.gethostbyname(socket.gethostname()),
             'rx': rxbytes_per_s,
             'tx': txbytes_per_s,
             'cpu': cpu_util}
