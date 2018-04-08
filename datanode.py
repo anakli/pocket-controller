@@ -9,7 +9,7 @@ import pickle
 import sys
 import socket
 
-HOSTNAME = 'localhost'
+HOSTNAME = sys.argv[1]
 PORT = 12345
 
 def get_net_bytes(rxbytes, txbytes) :
@@ -23,7 +23,7 @@ def get_net_bytes(rxbytes, txbytes) :
 
 def tx_util_info(client, conn, cpu_util, rxbytes_per_s, txbytes_per_s):
     log = {'timestamp': time.time(),
-            'datanodeid': socket.gethostbyname(socket.gethostname()),
+            'datanodeid': conn.socket.getsockname()[0],
             'rx': rxbytes_per_s,
             'tx': txbytes_per_s,
             'cpu': cpu_util}
@@ -39,6 +39,7 @@ if __name__ == "__main__":
     
     client = Client()
     conn = client.connect(HOSTNAME, PORT)
+    print "Connected to ", HOSTNAME
 
     while(True):
         c, r, t = get_net_bytes(rxbytes, txbytes)

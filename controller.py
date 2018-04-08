@@ -1,8 +1,9 @@
 ##############  Pocket controller  ####################
 
 from jsonsocket import Server
+import sys
 
-HOSTNAME = 'localhost'
+HOSTNAME = sys.argv[1]
 PORT = 12345
 
 def rx_util_info(server):
