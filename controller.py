@@ -68,8 +68,9 @@ class ReqHandler(asyncore.dispatcher):
         pass 
 
     def handle_close(self):
-        print "Closing socket with fd" + self.socket.fileno()
+        print "close conn" 
         self.close()
+        self.server.handle_accept()
         return False
         
 
