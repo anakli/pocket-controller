@@ -8,6 +8,13 @@ import json
 HOSTNAME = sys.argv[1]
 PORT = 12345
 
+global_cpu = {}
+global_rxGbs = {}
+global_rxGbs = {}
+global_lastUpdate = {}
+
+BYTES_PER_SEC_LIMIT_10Gbs = 1.25e9
+TIMEOUT_SEC = 5
 
 class ReqHandler(asyncore.dispatcher):
 
@@ -43,19 +50,17 @@ class ReqHandler(asyncore.dispatcher):
             recv_size = self.recv_into(view[next_offset:], total - next_offset)
             next_offset += recv_size
         try:
-            deserialized = json.loads(view.tobytes())
-            print deserialized
+            util = json.loads(view.tobytes())
+            print util
+            dnId = util['datanodeid']
+            global_cpu[dnId] = util['cpu']
+            print "util rx:" , util['rx']
+            global_rxGbs[dnId] = util['rx'] / BYTES_PER_SEC_LIMIT_10Gbs
+            global_rxGbs[dnId] = util['tx'] / BYTES_PER_SEC_LIMIT_10Gbs
+            global_lastUpdate[dnId] = util['timestamp']
+            #TODO: global_DRAM_GB, global_Flash_GB
         except (TypeError, ValueError), e:
             raise Exception('Data received was not in JSON format')
-        ## echo server code
-        #data = self.recv(1024)
-        #print("after recv")
-        #if data:
-        #    print("got data")
-        #    self.buffer += data
-        #    self.is_writable = True  # sth to send back now
-        #else:
-        #    print("got null data")
 
     def handle_write(self):
         if self.buffer:
@@ -77,7 +82,7 @@ class ReqHandler(asyncore.dispatcher):
 class ReqServer(asyncore.dispatcher):
 
     allow_reuse_address         = True
-    request_queue_size          = 10
+    request_queue_size          = 10    #FIXME: how should set this?
     address_family              = socket.AF_INET
     socket_type                 = socket.SOCK_STREAM
 
@@ -107,7 +112,7 @@ class ReqServer(asyncore.dispatcher):
         return self.socket.fileno()
 
     def serve_forever(self):
-        asyncore.loop()
+        asyncore.loop(timeout=1, count=TIMEOUT_SEC)
 
     # Internal use
     def handle_accept(self):
@@ -128,9 +133,18 @@ class ReqServer(asyncore.dispatcher):
         self.close()
 
 
-# TODO: compute total cluster utilization
-# TODO: implement heuristics for deciding when to add/remove datanode
 if __name__ == "__main__":
     server = ReqServer((HOSTNAME, PORT))
-    server.serve_forever()
-    
+    while True:
+        server.serve_forever()
+        # TODO: compute average cluster util every TIMEOUT_SEC
+        # TODO: implement heuristics for deciding when to add/remove datanode
+       
+        # example: calculating avg rx net bw utilization (assuming 10 Gb/s max per node)
+        # do we care more about avg across nodes or peak among nodes?
+        if len(global_rxGbs) > 0:
+            #print global_rxGbs
+            rx_util = float(sum(global_rxGbs.values())) / len(global_rxGbs)
+        else: 
+            rx_util = 0
+        print "avg cluster rx net BW:" , rx_util
