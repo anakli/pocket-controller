@@ -1,0 +1,147 @@
+apiVersion: kops/v1alpha2
+kind: Cluster
+metadata:
+  creationTimestamp: null
+  name: pocketcluster.k8s.local
+spec:
+  api:
+    loadBalancer:
+      #type: Public
+      type: Internal
+  authorization:
+    rbac: {}
+  channel: stable
+  cloudProvider: aws
+  configBase: s3://anakli-kubernetes-statestore/pocketcluster.k8s.local
+  etcdClusters:
+  - etcdMembers:
+    - instanceGroup: master-us-west-2c
+      name: c
+    name: main
+  - etcdMembers:
+    - instanceGroup: master-us-west-2c
+      name: c
+    name: events
+  iam:
+    allowContainerRegistry: true
+    legacy: false
+  kubernetesApiAccess:
+  - 0.0.0.0/0
+  kubernetesVersion: 1.9.3
+  masterPublicName: api.pocketcluster.k8s.local
+  networkCIDR: 10.1.0.0/16
+  networkID: vpc-7b643f02
+  networking:
+    cni: {}
+  nonMasqueradeCIDR: 100.64.0.0/10
+  sshAccess:
+  - 0.0.0.0/0
+  subnets:
+#  - cidr: 10.1.32.0/19
+  - cidr: 10.1.128.0/17
+    name: us-west-2c
+    type: Private
+    zone: us-west-2c
+#  - cidr: 10.1.0.0/22
+  - cidr: 10.1.0.0/24
+    name: utility-us-west-2c
+    type: Utility
+    zone: us-west-2c
+  topology:
+    #bastion:
+    #  bastionPublicName: bastion.pocketcluster.k8s.local
+    dns:
+      type: Public
+    masters: private
+    nodes: private
+    #masters: public
+    #nodes: public
+
+---
+
+apiVersion: kops/v1alpha2
+kind: InstanceGroup
+metadata:
+  creationTimestamp: null
+  labels:
+    kops.k8s.io/cluster: pocketcluster.k8s.local
+  name: master-us-west-2c
+spec:
+  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  #image: ami-4e79ed36
+  machineType: m5.large
+  maxSize: 1
+  minSize: 1
+  nodeLabels:
+    kops.k8s.io/instancegroup: master-us-west-2c
+  role: Master
+  subnets:
+  - us-west-2c
+
+---
+
+apiVersion: kops/v1alpha2
+kind: InstanceGroup
+metadata:
+  creationTimestamp: null
+  labels:
+    kops.k8s.io/cluster: pocketcluster.k8s.local
+  name: dram-nodes
+spec:
+  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  #image: ami-4e79ed36
+  machineType: t2.micro
+  maxSize: 1
+  minSize: 1
+  nodeLabels:
+    kops.k8s.io/instancegroup: dram-nodes
+    spot: "true"
+    flash: "false"
+  rootVolumeSize: 10
+  role: Node
+  subnets:
+  - us-west-2c
+
+---
+
+apiVersion: kops/v1alpha2
+kind: InstanceGroup
+metadata:
+  creationTimestamp: null
+  labels:
+    kops.k8s.io/cluster: pocketcluster.k8s.local
+  name: nvme-nodes
+spec:
+  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  #image: ami-4e79ed36
+  machineType: t2.micro
+  maxSize: 1
+  minSize: 1
+  nodeLabels:
+    kops.k8s.io/instancegroup: nvme-nodes
+    spot: "false"
+    flash: "true"
+  rootVolumeSize: 10
+  role: Node
+  subnets:
+  - us-west-2c
+
+#---
+#apiVersion: kops/v1alpha2
+#kind: InstanceGroup
+#metadata:
+#  creationTimestamp: null
+#  labels:
+#    kops.k8s.io/cluster: pocketcluster.k8s.local
+#  name: bastions
+#spec:
+#  #image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+#  image: ami-4e79ed36
+#  machineType: t2.micro
+#  maxSize: 1
+#  minSize: 1
+#  nodeLabels:
+#    kops.k8s.io/instancegroup: bastions
+#  role: Bastion
+#  subnets:
+#  - utility-us-west-2c
