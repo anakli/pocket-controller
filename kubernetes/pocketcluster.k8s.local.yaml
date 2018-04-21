@@ -32,7 +32,7 @@ spec:
   networkCIDR: 10.1.0.0/16
   networkID: vpc-7b643f02
   networking:
-    cni: {}
+    weave: {}
   nonMasqueradeCIDR: 100.64.0.0/10
   sshAccess:
   - 0.0.0.0/0
@@ -69,7 +69,8 @@ metadata:
 spec:
   image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
   #image: ami-4e79ed36
-  machineType: m5.large
+  #machineType: m5.xlarge
+  machineType: m3.medium
   maxSize: 1
   minSize: 1
   nodeLabels:
@@ -90,7 +91,7 @@ metadata:
 spec:
   image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
   #image: ami-4e79ed36
-  machineType: t2.micro
+  machineType: t2.medium
   maxSize: 1
   minSize: 1
   nodeLabels:
@@ -114,7 +115,7 @@ metadata:
 spec:
   image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
   #image: ami-4e79ed36
-  machineType: t2.micro
+  machineType: t2.medium
   maxSize: 1
   minSize: 1
   nodeLabels:
