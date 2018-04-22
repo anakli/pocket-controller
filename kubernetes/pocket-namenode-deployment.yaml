@@ -15,3 +15,7 @@ spec:
         image: anakli/pocket-namenode
         ports:
         - containerPort: 9070
+#      - name: pocket-datanode-dram
+#        image: anakli/pocket-datanode-dram
+#        ports:
+#        - containerPort: 50030

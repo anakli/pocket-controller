@@ -54,8 +54,6 @@ spec:
       type: Public
     masters: private
     nodes: private
-    #masters: public
-    #nodes: public
 
 ---
 
@@ -67,8 +65,8 @@ metadata:
     kops.k8s.io/cluster: pocketcluster.k8s.local
   name: master-us-west-2c
 spec:
-  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
-  #image: ami-4e79ed36
+  #image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  image: ami-4e79ed36
   #machineType: m5.xlarge
   machineType: m3.medium
   maxSize: 1
@@ -89,9 +87,10 @@ metadata:
     kops.k8s.io/cluster: pocketcluster.k8s.local
   name: dram-nodes
 spec:
-  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
-  #image: ami-4e79ed36
-  machineType: t2.medium
+  #image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  image: ami-4e79ed36
+  #machineType: t2.medium
+  machineType: r4.large
   maxSize: 1
   minSize: 1
   nodeLabels:
@@ -113,8 +112,8 @@ metadata:
     kops.k8s.io/cluster: pocketcluster.k8s.local
   name: nvme-nodes
 spec:
-  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
-  #image: ami-4e79ed36
+  #image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  image: ami-4e79ed36
   machineType: t2.medium
   maxSize: 1
   minSize: 1
