@@ -19,6 +19,41 @@ def get_exitcode_stdout_stderr(cmd):
     return exitcode, out, err
 
 
+def prep_i3instances(private_subnetid, node_groupid):
+    # get instance ids for i3 instances
+    cmd = "aws ec2 describe-instances --filters Name=tag:Name,Values='nvme-nodes.pocketcluster*' " \
+           + "Name=instance-state-name,Values='running'  --query \"Reservations[*].Instances[*].InstanceId\""
+    exitcode, out, err = get_exitcode_stdout_stderr(cmd)
+    pattern = r'"([A-Za-z0-9_\./\\-]*)"'
+    p = re.compile(pattern)
+    i3_instance_ids = p.findall(out) 
+    print "i3 instance ids findall: ", i3_instance_ids 
+    
+    i = 0
+    for i3_instance_id in i3_instance_ids:
+        # create elastic network interface 
+        create_eni_command = "aws ec2 create-network-interface --subnet-id " + private_subnetid + " --description \"eni for i3\" --groups " \
+                               + node_groupid  
+        print create_eni_command
+        sp.call(create_eni_command, shell=True)
+        
+        # get i3 eni id
+        cmd = "aws ec2 describe-network-interfaces --filter Name=description,Values='*eni for i3*' --query \"NetworkInterfaces[*].NetworkInterfaceId\""
+        exitcode, out, err = get_exitcode_stdout_stderr(cmd)
+        pattern = r'"([A-Za-z0-9_\./\\-]*)"'
+        #i3_eni = re.search(pattern, out).group().strip('\"')
+        i3_enis = p.findall(out)
+        i3_eni = i3_enis[i]
+        i = i + 1 #FIXME: are they always listed in order created?
+        print "i3 ENI id is: " + i3_eni
+    
+        # attach eni to i3 instance
+        attach_eni_command = "aws ec2 attach-network-interface --network-interface-id " + i3_eni + " --instance-id " + i3_instance_id + " --device-index 1"
+        print attach_eni_command
+        sp.call(attach_eni_command, shell=True)
+   
+
+
 def add_namenode_eni():
     # get subnet id for private subnet
     cmd = "aws ec2 describe-subnets --filters Name=tag:Name,Values='us-west*pocket*' --query \"Subnets[*].SubnetId\""
@@ -58,6 +93,8 @@ def add_namenode_eni():
     print attach_eni_command
     sp.call(attach_eni_command, shell=True)
 
+    return private_subnetid, node_groupid
+
 
 def add_lambda_security_group_ingress_rule():
     # get group id for pocket-kubernetes-lax security group 
@@ -81,7 +118,8 @@ def add_lambda_security_group_ingress_rule():
 
 def main():
     add_lambda_security_group_ingress_rule()
-    add_namenode_eni()
+    private_subnet_id, node_groupid = add_namenode_eni()
+    prep_i3instances(private_subnet_id, node_groupid)
 
 
 if __name__ == '__main__':
