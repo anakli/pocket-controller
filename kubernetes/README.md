@@ -23,13 +23,18 @@ sudo mv ./kubectl /usr/local/bin/kubectl
 
 ```
 
-Install kubernetes. 
+Install [kubernetes python client](https://github.com/kubernetes-client/python): 
 
 ```
 pip install kubernetes
 ```
 
 Install aws-cli. And run `aws configure` to setup your credentials.
+
+```
+pip install awscli --upgrade --user
+aws configure
+```
 
 Ensure your AWS IAM user has the following permissions (see [here](https://github.com/kubernetes/kops/blob/master/docs/aws.md) for more details):
 
@@ -56,7 +61,6 @@ Set environment variables:
 ```
 export NAME=pocketcluster.k8s.local
 export KOPS_STATE_STORE=s3://pocket-kubernetes-statestore
-export POCKET_VPC=vpc-xxxxx
 
 ```
 
