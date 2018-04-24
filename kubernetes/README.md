@@ -154,3 +154,12 @@ docker run -it --net=host --privileged anakli/pocket-shell
 # ./bin/crail fs -ls /
 # ./bin/crail iobench -t write -f /test.data -s 4096 -k 100 -w 0
 ```
+
+## Tearing down the kubernetes cluster
+
+Kops will delete all the resources it created (security groups, autoscaling groups, volumes, instances, etc). However, we first need to delete the secondary interface we created for the metadata node (run the python script). 
+
+```
+python prep_delete_cluster.py
+kops delete cluster $NAME --yes
+```
