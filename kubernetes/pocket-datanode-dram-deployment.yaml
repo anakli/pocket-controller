@@ -1,0 +1,19 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: pocket-datanode-dram-deployment
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: pocket-datanode-dram
+    spec:
+      hostNetwork: true
+      containers:
+      - name: pocket-datanode-dram
+        image: anakli/pocket-datanode-dram
+        ports:
+        - containerPort: 50030
+      nodeSelector: 
+        pocketnodetype: "dram"
