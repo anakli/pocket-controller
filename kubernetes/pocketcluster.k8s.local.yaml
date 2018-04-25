@@ -29,21 +29,24 @@ spec:
   kubernetesVersion: 1.9.3
   masterPublicName: api.pocketcluster.k8s.local
   networkCIDR: 10.1.0.0/16
-  networkID: vpc-7b643f02
+  networkID: vpc-86fbdcff
   networking:
     weave: {}
   nonMasqueradeCIDR: 100.64.0.0/10
   sshAccess:
   - 0.0.0.0/0
   subnets:
-  - cidr: 10.1.128.0/17
-    name: us-west-2c
+  - cidr: 10.1.0.0/17
+    name: pocket-kube-private
     type: Private
     zone: us-west-2c
-  - cidr: 10.1.0.0/24
-    name: utility-us-west-2c
-    type: Utility
+    id: subnet-7c94f026
+    egress: nat-0291ceb8f469222dd
+  - cidr: 10.1.129.32/27
+    name: pocket-kube-public
+    type: Public
     zone: us-west-2c
+    id: subnet-6389ed39
   topology:
     dns:
       type: Public
@@ -68,7 +71,7 @@ spec:
     kops.k8s.io/instancegroup: master-us-west-2c
   role: Master
   subnets:
-  - us-west-2c
+  - pocket-kube-private
 
 ---
 
@@ -82,8 +85,8 @@ metadata:
 spec:
   image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
   machineType: r4.large
-  maxSize: 1
-  minSize: 1
+  maxSize: 0
+  minSize: 0
   nodeLabels:
     kops.k8s.io/instancegroup: dram-nodes
     spot: "true"
@@ -91,7 +94,7 @@ spec:
   rootVolumeSize: 12
   role: Node
   subnets:
-  - us-west-2c
+  - pocket-kube-private
 
 ---
 
@@ -114,7 +117,7 @@ spec:
   rootVolumeSize: 12
   role: Node
   subnets:
-  - us-west-2c
+  - pocket-kube-private
 
 ---
 
@@ -126,15 +129,16 @@ metadata:
     kops.k8s.io/cluster: pocketcluster.k8s.local
   name: nvme-nodes
 spec:
-  image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
-  machineType: i3.large
-  maxSize: 0
-  minSize: 0
+  #image: kope.io/k8s-1.8-debian-jessie-amd64-hvm-ebs-2018-02-08
+  image: ami-310a6249
+  machineType: i3.xlarge
+  maxSize: 1
+  minSize: 1
   nodeLabels:
     kops.k8s.io/instancegroup: nvme-nodes
     spot: "false"
     pocketnodetype: "nvme"
-  rootVolumeSize: 12
+  rootVolumeSize: 15
   role: Node
   subnets:
-  - us-west-2c
+  - pocket-kube-private

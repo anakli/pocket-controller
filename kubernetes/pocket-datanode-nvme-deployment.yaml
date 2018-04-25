@@ -1,0 +1,38 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: pocket-datanode-nvme-deployment
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: pocket-datanode-nvme
+    spec:
+      hostNetwork: true
+      privileged: true
+      containers:
+      - name: pocket-datanode-nvme
+        image: yawenw/pocket-reflex
+        #image: yawenw/pocket-reflex-debug
+        securityContext:
+          privileged: true
+          allowPrivilegeEscalation: true
+        volumeMounts:
+        - mountPath: /dev
+          name: dev
+        - mountPath: /lib/modules/4.4.115-k8s
+          name: lib
+        ports:
+        - containerPort: 1234
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
+          type: Directory
+      - name: lib
+        hostpath: 
+          path: /lib/modules/4.4.115-k8s
+          type: Directory
+      nodeSelector: 
+        pocketnodetype: "nvme"

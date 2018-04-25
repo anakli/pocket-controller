@@ -4,7 +4,7 @@ Instructions for seting up Pocket with kubernetes.
 
 ## Before you start
 
-Create a pocket-kubernetes VPC, pocket-kubernetes subnet, pocket-kubernetes-open security group. 
+Create a pocket-kubernetes VPC, pocket-kubernetes subnet, pocket-kubernetes-open security group and internet gateway. 
 Create a s3 bucket for your kops cluster state store. 
 Choose a name for your pocket cluster that ends with '.k8s.local', e.g., pocketcluster.k8s.local.
 
