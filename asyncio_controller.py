@@ -66,15 +66,16 @@ hdr_resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
 dn_req_packer = struct.Struct("!iqhiiiii")
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
-datanode_usage = pd.DataFrame(columns=['datanodeip', 'port', 'cpu', 'net_Mbps']).set_index(['datanodeip', 'port'])
+datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps']).set_index(['datanodeip_port'])
 datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
-datanode_provisioned = pd.DataFrame(columns=['datanodeip', 'port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip', 'port'])
+datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 avg_util = {'cpu': 0, 'net': 0, 'DRAM': 0, 'Flash': 0}
 
 
 # NOTE: assuming i3 and r4 2xlarge instances
 def add_datanode_provisioned(datanodeip, port, num_cpu):
-  if (datanodeip, port) in datanode_alloc.index.values.tolist():
+  datanode = datanodeip + ":" + str(port)
+  if datanode in datanode_alloc.index.values:
     #print("Datanode {}:{} is already in table".format(datanodeip, port))
     return 1
   if port == 50030:
@@ -83,7 +84,7 @@ def add_datanode_provisioned(datanodeip, port, num_cpu):
   elif port == 1234:
     datanode_provisioned.loc[(datanodeip, port),:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=0, Flash_GB=2000, blacklisted=0)
   else:
-    print("ERROR: unrecognized port! assuming 50030 for dram, 1234 for flash/reflex")
+    print("ERROR: unrecognized port! assuming 50030 for dram, 1234 for Flash/ReFlex")
 
 def add_datanode_alloc(datanodeip, port):
   datanode = datanodeip + ":" + str(port)
@@ -94,6 +95,7 @@ def add_datanode_alloc(datanodeip, port):
   datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=randint(0,10)*1.0/10, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
 
 def add_datanode_usage(datanodeip, port, cpu, net):
+  datanode = datanodeip + ":" + str(port)
   datanode_usage.loc[(datanodeip, port),:] = dict(cpu=cpu, net_Mbps=net)
 
 
@@ -155,12 +157,13 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       print("net for node {} is {}".format(node, net))
       if net == 1.0:
         continue
+      #TODO: before decide to use a node, also much check weight*capacity satisfies capacity constraint!
       if job_net_weight_req - spare_net_weight_alloc >= 1 - net: 
         spare_net_weight_alloc += 1 - net
         print("setting datanode_alloc to 1 for datanode {}".format(node))
         datanode_alloc.at[node,'net_Mbps'] = 1
         wmask.append((node, 1- net))
-      elif job_net_weight_req - spare_net_weight_alloc < 1 - net:      #FIXME!!!
+      elif job_net_weight_req - spare_net_weight_alloc < 1 - net:
         print("setting datanode_alloc to {} for datanode {}".format(net + (job_net_weight_req - spare_net_weight_alloc),node))
         datanode_alloc.at[node,'net_Mbps'] = net + (job_net_weight_req - spare_net_weight_alloc)
         wmask.append((node, job_net_weight_req - spare_net_weight_alloc))
@@ -179,9 +182,9 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       extra_nodes_needed = (job_net_weight_req - spare_net_weight_alloc)
       last_weight = extra_nodes_needed - int(extra_nodes_needed)
       if last_weight == 0:
-        new_node_weights = [1 for i in range(0,extra_nodes_needed)]
+        new_node_weights = [1 for i in range(0, extra_nodes_needed)]
       else:
-        new_node_weights = [1 for i in range(0, extra_nodes_needed -1)]
+        new_node_weights = [1 for i in range(0, int(extra_nodes_needed))]
         new_node_weights.append(last_weight)
       datanode_alloc_prelaunch = datanode_alloc
       print("TODO: LAUNCH {} extra nodes, wait for them to come up and assing proper weights {}"\
@@ -193,7 +196,14 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
    
   
   # TODO: If capacity bound, will allocate nodes based on DRAM or Flash capacity (depending on latency sensitivity)
- 
+  else:
+    # find all nodes that have spare capacity
+    print("NOTICE: the app is capacity-bound. \
+           TODO: need to implement weightmask generation for this case. Not yet supported.\n")
+    # should be similar to sizing based on capacity
+    # but need to decide whether to use DRAM or Flash capacity based on latency sensitivity
+    # skipping this for now since all our apps are throughput-bound
+
   # convert weightmask to proper format
   job_wmask = []
   for (datanodeip_port, weight) in wmask:
