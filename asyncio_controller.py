@@ -11,7 +11,8 @@ NAMENODE_IP = "10.1.88.82"
 NAMENODE_PORT = 9070
 
 STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
-GET_CAPACITY_STATS_INTERVAL = 5  # in seconds
+GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
+AUTOSCALE_INTERVAL = 1           # in seconds
 
 # define RPC_CMDs and CMD_TYPEs
 RPC_IOCTL_CMD = 13
@@ -45,7 +46,7 @@ BYTE = 1
 REQ_STRUCT_FORMAT = "!iqhhi" # msg_len (INT), ticket (LONG LONG), cmd (SHORT), cmd_type (SHORT), register_type (INT)
 REQ_LEN_HDR = SHORT + SHORT + BYTE # CMD, CMD_TYPE, IOCTL_OPCODE (note: doesn't include msg_len or ticket from NaRPC hdr)
 MSG_LEN_HDR = INT + LONG + SHORT + SHORT + INT # MSG_LEN + TICKET + CMD, CMD_TYPE, OPCODE
-DN_LEN_HDR = INT + LONG + SHORT + 4*(INT)
+DN_LEN_HDR = INT + LONG + SHORT + 5*(INT)
 
 RESP_STRUCT_FORMAT = "!iqhhi" # msg_len (INT), ticket (LONG LONG), cmd (SHORT), error (SHORT), register_opcode (INT)
 RESP_LEN_BYTES = INT + LONG + SHORT + SHORT + INT # MSG_LEN, TICKET, CMD, ERROR, REGISTER_OPCODE 
@@ -56,10 +57,36 @@ RESP_ERR = 1
 
 hdr_req_packer = struct.Struct(REQ_STRUCT_FORMAT)
 hdr_resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
-dn_req_packer = struct.Struct("!iqhiiii")
+dn_req_packer = struct.Struct("!iqhiiiii")
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
+datanode_usage = pd.DataFrame(columns=['datanodeip', 'port', 'cpu', 'net_Mbps']).set_index(['datanodeip', 'port'])
+datanode_alloc = pd.DataFrame(columns=['datanodeip', 'port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip', 'port'])
+datanode_provisioned = pd.DataFrame(columns=['datanodeip', 'port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip', 'port'])
 avg_util = {'cpu': 0, 'net': 0, 'DRAM': 0, 'Flash': 0}
+
+
+# NOTE: assuming i3 and r4 2xlarge instances
+def add_datanode_provisioned(datanodeip, port, num_cpu):
+  if (datanodeip, port) in datanode_alloc.index.values.tolist():
+    #print("Datanode {}:{} is already in table".format(datanodeip, port))
+    return 1
+  if port == 50030:
+    print(datanodeip, port, num_cpu)
+    datanode_provisioned.loc[(datanodeip, port),:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=60, Flash_GB=0, blacklisted=0)
+  elif port == 1234:
+    datanode_provisioned.loc[(datanodeip, port),:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=0, Flash_GB=2000, blacklisted=0)
+  else:
+    print("ERROR: unrecognized port! assuming 50030 for dram, 1234 for flash/reflex")
+
+def add_datanode_alloc(datanodeip, port):
+  if (datanodeip, port) in datanode_alloc.index.values.tolist():
+    #print("Datanode {}:{} is already in table".format(datanodeip, port))
+    return 1
+  datanode_alloc.loc[(datanodeip, port),:] = dict(cpu=0, net_Mbps=0, DRAM_GB=0, Flash_GB=0, blacklisted=0)
+
+def add_datanode_usage(datanodeip, port, cpu, net):
+  datanode_usage.loc[(datanodeip, port),:] = dict(cpu=cpu, net_Mbps=net)
 
 
 def add_job(jobid, GB, Mbps, wmask):
@@ -194,15 +221,25 @@ def handle_datanodes(reader, writer):
   print('Accepted datanode connection from {}'.format(address))
   while True:
     hdr = yield from reader.read(DN_LEN_HDR) 
-    [msg_len, ticket, cmd, datanode_addr, rx_util, tx_util, num_cores] = dn_req_packer.unpack(hdr)
+    [msg_len, ticket, cmd, datanode_int, port, rx_util, tx_util, num_cores] = dn_req_packer.unpack(hdr)
     if cmd != UTIL_STAT_CMD:
-      print("ERROR: unknown IOCTL_CMD opcode ", opcode);
+      print("ERROR: unknown datanode opcode ", opcode);
     cpu_util = yield from reader.read(num_cores * INT)
     cpu_util = struct.Struct("!" + "i"*num_cores).unpack(cpu_util)
-    print(datanode_addr, ticket, rx_util, tx_util, cpu_util)
+    if len(cpu_util) == 0:
+      avg_cpu = 0
+    else:
+      avg_cpu = sum(cpu_util)/len(cpu_util)
+    peak_net = max(rx_util, tx_util)
+    # add datanode to tables
+    datanode_ip = socket.inet_ntoa(struct.pack('!L', datanode_int))
+    add_datanode_provisioned(datanode_ip, port, len(cpu_util))
+    add_datanode_alloc(datanode_ip, port) 
+    add_datanode_usage(datanode_ip, port, avg_cpu, peak_net) 
+    print(datanode_ip, port, ticket, rx_util, tx_util, cpu_util)
 
 @asyncio.coroutine
-def send_periodically(sock):
+def get_capacity_stats_periodically(sock):
   while True:
     yield from asyncio.sleep(GET_CAPACITY_STATS_INTERVAL)
     for tier in STORAGE_TIERS: 
@@ -220,6 +257,14 @@ def send_periodically(sock):
         avg_util['Flash'] = avg_usage 
 
 
+@asyncio.coroutine
+def autoscale_cluster():
+  while True:
+    yield from asyncio.sleep(AUTOSCALE_INTERVAL)
+    # FIXME: insert logic for checking upper and lower util limits
+    #        add/remove datanodes and metadata nodes as necessary
+
+
 if __name__ == '__main__':
   
   loop = asyncio.get_event_loop()
@@ -232,8 +277,11 @@ if __name__ == '__main__':
  
   # Initialize routine to periodically send
   metadata_socket = ioctlcmd.connect_until_succeed(NAMENODE_IP, NAMENODE_PORT)
-  asyncio.async(send_periodically(metadata_socket))
+  asyncio.async(get_capacity_stats_periodically(metadata_socket))
 
+  # Periodically check avg utilization and run autoscale algorithm
+  asyncio.async(autoscale_cluster())
+ 
   # Start server listening for datanode util info
   address = ("10.1.47.178", 2345) 
   coro = asyncio.start_server(handle_datanodes, *address)
