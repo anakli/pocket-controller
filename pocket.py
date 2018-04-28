@@ -45,16 +45,19 @@ def launch_dispatcher(crail_home_path):
   return 
 
 # TODO: add heuristics
-def register_job(jobname):
+# default hints: 1000 lambdas is default user limit, conservatively assume latency sensitive
+#                default cluster uses 50 i3 nodes with DRAM + memory tiers 
+#                default capacity: 50*(60+2000) = 10300 GB, default Gbs = 50*8Gb/s per node = 400 Gb/s
+def register_job(jobname, num_lambdas=1000, capacityMB=10300000, peakMbs=400000, latency_sensitive=1):
   # connect to controller
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   sock.connect((CONTROLLER_IP, CONTROLLER_PORT))
-  #TODO: add hints
 
   # send register request to controller
-  msg_packer = struct.Struct(REQ_STRUCT_FORMAT + "i" + str(len(jobname)) + "s") # len(jobname) (INT) + jobname (STRING)
-  msgLen = REQ_LEN_HDR + INT + len(jobname)
-  sampleMsg = (msgLen, TICKET, RPC_JOB_CMD, JOB_CMD, REGISTER_OPCODE, len(jobname), jobname)
+  msg_packer = struct.Struct(REQ_STRUCT_FORMAT + "i" + str(len(jobname)) + "s" + "iiih") 
+  msgLen = REQ_LEN_HDR + INT + len(jobname) + 3*INT + SHORT
+  sampleMsg = (msgLen, TICKET, RPC_JOB_CMD, JOB_CMD, REGISTER_OPCODE, len(jobname), jobname, \
+                 num_lambdas, capacityMB, peakMbs, latency_sensitive)
   pkt = msg_packer.pack(*sampleMsg)
   sock.sendall(pkt)
 
