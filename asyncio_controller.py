@@ -67,7 +67,7 @@ dn_req_packer = struct.Struct("!iqhiiiii")
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
 datanode_usage = pd.DataFrame(columns=['datanodeip', 'port', 'cpu', 'net_Mbps']).set_index(['datanodeip', 'port'])
-datanode_alloc = pd.DataFrame(columns=['datanodeip', 'port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip', 'port'])
+datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 datanode_provisioned = pd.DataFrame(columns=['datanodeip', 'port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip', 'port'])
 avg_util = {'cpu': 0, 'net': 0, 'DRAM': 0, 'Flash': 0}
 
@@ -86,10 +86,12 @@ def add_datanode_provisioned(datanodeip, port, num_cpu):
     print("ERROR: unrecognized port! assuming 50030 for dram, 1234 for flash/reflex")
 
 def add_datanode_alloc(datanodeip, port):
-  if (datanodeip, port) in datanode_alloc.index.values.tolist():
+  datanode = datanodeip + ":" + str(port)
+  if datanode in datanode_alloc.index.values:
     #print("Datanode {}:{} is already in table".format(datanodeip, port))
     return 1
-  datanode_alloc.loc[(datanodeip, port),:] = dict(cpu=0, net_Mbps=0, DRAM_GB=0, Flash_GB=0, blacklisted=0)
+  #datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
+  datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=randint(0,10)*1.0/10, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
 
 def add_datanode_usage(datanodeip, port, cpu, net):
   datanode_usage.loc[(datanodeip, port),:] = dict(cpu=cpu, net_Mbps=net)
@@ -132,15 +134,76 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     print("jobid {} is throughput-bound".format(jobid))
     throughput_bound = 1
   else:
-    print("jobid {} is latency-bound".format(jobid))
+    print("jobid {} is capacity-bound".format(jobid))
     throughput_bound = 0
   
   # Step 2: check available resources in cluster
   # If throughput bound, will allocate nodes based on CPU and network demand 
-  # If capacity bound, will allocate nodes based on DRAM or Flash capacity (depending on latency sensitivity)
+  if throughput_bound:
+    # find all nodes that have spare Mbps 
+    print(datanode_alloc)
+    spare_throughput = datanode_alloc['net_Mbps'] < 1
+    candidate_nodes_net = datanode_alloc[spare_throughput].sort_values(by='net_Mbps', ascending=False).loc[:, 'net_Mbps']
+    spare_net_weight_alloc = 0
+    job_net_weight_req = jobMbps * 1.0 / NODE_Mbps
+    print(candidate_nodes_net)
+
+    print("job net weight req {}, this is {} Mbps".format(job_net_weight_req, jobMbps))
+    # smallest fit first algorithm: fill in smallest gap first
+    for node in candidate_nodes_net.index: 
+      net = candidate_nodes_net[node]
+      print("net for node {} is {}".format(node, net))
+      if net == 1.0:
+        continue
+      if job_net_weight_req - spare_net_weight_alloc >= 1 - net: 
+        spare_net_weight_alloc += 1 - net
+        print("setting datanode_alloc to 1 for datanode {}".format(node))
+        datanode_alloc.at[node,'net_Mbps'] = 1
+        wmask.append((node, 1- net))
+      elif job_net_weight_req - spare_net_weight_alloc < 1 - net:      #FIXME!!!
+        print("setting datanode_alloc to {} for datanode {}".format(net + (job_net_weight_req - spare_net_weight_alloc),node))
+        datanode_alloc.at[node,'net_Mbps'] = net + (job_net_weight_req - spare_net_weight_alloc)
+        wmask.append((node, job_net_weight_req - spare_net_weight_alloc))
+        spare_net_weight_alloc += job_net_weight_req - spare_net_weight_alloc
+
+      if spare_net_weight_alloc == job_net_weight_req:
+        break
+    
+      if spare_net_weight_alloc > job_net_weight_req:
+        print("ERROR: shouldn't be allocating more than job needs! something went wrong...")
+        break
+    if spare_net_weight_alloc == job_net_weight_req:
+      print("Satisified job without needing to launch new nodes :)")
+      print(datanode_alloc)
+    else:
+      extra_nodes_needed = (job_net_weight_req - spare_net_weight_alloc)
+      last_weight = extra_nodes_needed - int(extra_nodes_needed)
+      if last_weight == 0:
+        new_node_weights = [1 for i in range(0,extra_nodes_needed)]
+      else:
+        new_node_weights = [1 for i in range(0, extra_nodes_needed -1)]
+        new_node_weights.append(last_weight)
+      datanode_alloc_prelaunch = datanode_alloc
+      print("TODO: LAUNCH {} extra nodes, wait for them to come up and assing proper weights {}"\
+              .format(extra_nodes_needed, new_node_weights))
+      #FIXME: KUBERNETES LAUNCH JOBS with parallelism=extra_nodes_needed
+      #FIXME: need to wait for new nodes to start sending stats and add themselves to the datanode_alloc table,
+      #       then assign them the proper weights
+      #TODO: have a function that monitors status of datanode_alloc and compares to old version datanode_alloc_prelaunch
+   
   
-  # Step 3: 
-  return wmask
+  # TODO: If capacity bound, will allocate nodes based on DRAM or Flash capacity (depending on latency sensitivity)
+ 
+  # convert weightmask to proper format
+  job_wmask = []
+  for (datanodeip_port, weight) in wmask:
+    datanode_ip = datanodeip_port.split(":")[0]
+    datanode_port = int(datanodeip_port.split(":")[1])
+    datanode_hash = ioctlcmd.calculate_datanode_hash(datanode_ip, datanode_port) 
+    job_wmask.append((datanode_hash, float("{0:.2f}".format(weight))))
+
+  print(job_wmask) 
+  return job_wmask
 
 def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
 
@@ -364,6 +427,13 @@ if __name__ == '__main__':
   server = loop.run_until_complete(coro)
   print('Listening at {}'.format(address))
   print("Start loop...") 
+
+  # test with dummy datanodes
+  add_datanode_alloc("10.1.88.82", "50030")
+  add_datanode_alloc("10.1.88.83", "1234")
+  add_datanode_alloc("10.1.88.84", "50030")
+  add_datanode_alloc("10.1.88.85", "1234")
+
   try:
     loop.run_forever()
   finally:
