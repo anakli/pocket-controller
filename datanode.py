@@ -47,13 +47,16 @@ def send_util_info(sock, cpu_util, rxbytes_per_s, txbytes_per_s):
             'tx': txMbps,
             'cpu': cpu_util}
     # BINARY FORMAT: msgLen, ticket=timestamp, cmd, rxMbps, txMbs, numcores, cpuUtilCore0, cpuUtilCore1, etc..
-    msg_packer = struct.Struct("!iqhiiii" + "i"*len(cpu_util)) 
-    msgLen = INT + LONG + SHORT + 4*(INT) + len(cpu_util) * INT
+    msg_packer = struct.Struct("!iqhiiiii" + "i"*len(cpu_util)) 
+    msgLen = INT + LONG + SHORT + 5*(INT) + len(cpu_util) * INT
     TICKET = int(time.time())
 
-    ipaddr = ip2long(socket.gethostbyname(socket.gethostname())) # FIXME: check if this will work for the ReFlex datanodes!!!
+    # NOTE: this only works for DRAM node and assumes uses port 50030
+    # use different script for reflex datanode
+    ipaddr = ip2long(socket.gethostbyname(socket.gethostname())) 
+    PORT = 50030
     cpu_tuple = tuple([int(i) for i in cpu_util])
-    sampleMsg = (msgLen, TICKET, UTIL_STAT_CMD, ipaddr, int(rxMbps), int(txMbps), len(cpu_util)) + cpu_tuple #  int(sum(cpu_util)/len(cpu_util)))
+    sampleMsg = (msgLen, TICKET, UTIL_STAT_CMD, ipaddr, PORT, int(rxMbps), int(txMbps), len(cpu_util)) + cpu_tuple #  int(sum(cpu_util)/len(cpu_util)))
     flatten = lambda lst: reduce(lambda l, i: l + flatten(i) if isinstance(i, (list, tuple)) else l + [i], lst, [])   
     sampleMsg = tuple(flatten(sampleMsg))
     pkt = msg_packer.pack(*sampleMsg)
