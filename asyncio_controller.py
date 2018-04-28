@@ -14,6 +14,12 @@ STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
 GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
 AUTOSCALE_INTERVAL = 1           # in seconds
 
+DRAM_NODE_GB = 60
+FLASH_NODE_GB = 2000
+NODE_Mbps = 8000
+DEFAULT_NUM_NODES = 50
+PER_LAMBDA_MAX_Mbps = 600  
+
 # define RPC_CMDs and CMD_TYPEs
 RPC_IOCTL_CMD = 13
 NN_IOCTL_CMD = 13
@@ -107,23 +113,93 @@ def remove_job(jobid):
   print(job_table)
   return 0
 
+# Algorithm to generate weightmask
+# The weightmask defines the list of datanodes (including tier type) 
+# to spread this job's data across, along with an associated weight for each node
+# the weight is used for weighted random datanode block selection at the metdata server
+def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
+  print("generate weightmask for ", jobid, jobGB, jobMbps, latency_sensitive)
+  wmask = []
+  # Step 1: determine if capacity or throughput bound
+  if latency_sensitive:  
+    num_nodes_for_capacity = jobGB / DRAM_NODE_GB
+  else:
+    num_nodes_for_capacity = jobGB / FLASH_NODE_GB
+   
+  num_nodes_for_throughput = jobMbps / NODE_Mbps
+
+  if num_nodes_for_throughput > num_nodes_for_capacity:
+    print("jobid {} is throughput-bound".format(jobid))
+    throughput_bound = 1
+  else:
+    print("jobid {} is latency-bound".format(jobid))
+    throughput_bound = 0
+  
+  # Step 2: check available resources in cluster
+  # If throughput bound, will allocate nodes based on CPU and network demand 
+  # If capacity bound, will allocate nodes based on DRAM or Flash capacity (depending on latency sensitivity)
+  
+  # Step 3: 
+  return wmask
+
+def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
+
+  # determine jobGB and peakMbps based on provided hints (0 means not provided)
+  if num_lambdas == 0 and jobGB == 0 and peakMbps == 0: 
+    if latency_sensitive: 
+      jobGB = DEFAULT_NUM_NODES * (DRAM_NODE_GB + FLASH_NODE_GB)   
+    else:
+      jobGB = DEFAULT_NUM_NODES * (FLASH_NODE_GB)   
+    peakMbps = DEFAULT_NUM_NODES * NODE_Mbps  
+  elif num_lambdas != 0 and jobGB == 0 and peakMbps == 0:
+    num_nodes = num_lambdas * PER_LAMBDA_MAX_Mbps / NODE_Mbps
+    if latency_sensitive: 
+      jobGB = num_nodes * (DRAM_NODE_GB + FLASH_NODE_GB)   
+    else:
+      jobGB = num_nodes * (FLASH_NODE_GB)   
+    peakMbps = num_nodes * NODE_Mbps
+  elif num_lambdas != 0 and jobGB == 0: # only capacity unknown
+    num_nodes = num_lambdas * PER_LAMBDA_MAX_Mbps / NODE_Mbps
+    if latency_sensitive: 
+      jobGB = num_nodes * (DRAM_NODE_GB + FLASH_NODE_GB)   
+    else:
+      jobGB = num_nodes * (FLASH_NODE_GB)   
+  elif num_lambdas != 0 and peakMbps == 0: # only Mbps unknown
+    num_nodes = num_lambdas * PER_LAMBDA_MAX_Mbps / NODE_Mbps
+    peakMbps = num_nodes * NODE_Mbps
+  elif num_lambdas == 0 and jobGB == 0: # capacity and lambdas unknown
+    # use peakMbps hint to estimate number of nodes needed
+    num_nodes = peakMbps / NODE_Mbps
+    if latency_sensitive: 
+      jobGB = num_nodes * (DRAM_NODE_GB + FLASH_NODE_GB)   
+    else:
+      jobGB = num_nodes * (FLASH_NODE_GB)   
+  elif num_lambdas == 0 and peakMbps == 0: # Mbps and lambdas unknown
+    # use capacity hint to estimate number of nodes needed
+    if latency_sensitive:
+      num_nodes = jobGB / DRAM_NODE_GB
+    else:
+      num_nodes = jobGB / FLASH_NODE_GB
+    peakMbps = num_nodes * NODE_Mbps
+  if jobGB == 0:
+    jobGB = 1
+
+  return jobGB, peakMbps
+
+
 @asyncio.coroutine
 def handle_register_job(reader, writer):
   jobname_len = yield from reader.read(INT)
   jobname_len, = struct.Struct("!i").unpack(jobname_len)
   jobname = yield from reader.read(jobname_len + 3*INT + SHORT)
-  jobname, numlambdas, capacityMB, peakMbs, latency_sensitive = struct.Struct("!" + str(jobname_len) + "siiih").unpack(jobname)
+  jobname, num_lambdas, jobGB, peakMbps, latency_sensitive = struct.Struct("!" + str(jobname_len) + "siiih").unpack(jobname)
   jobname = jobname.decode('utf-8')
   
   # generate jobid
   jobid_int = randint(0,1000000)
   jobid = jobname + "-" + str(jobid_int)
 
-  # compute GB and GB/s based on heuristics and hints
-  # FIXME: use hints
-  jobGB = 50*2060      # default policty is 50 i3 nodes with DRAM and Flash tiers
-  jobMbps = 50*8000   
- 
+  print("received hints ", jobid, num_lambdas, jobGB, peakMbps, latency_sensitive) 
   # create dir named jobid
   # NOTE: this is blocking but we are not yielding
   createdirsock = pocket.connect(NAMENODE_IP, NAMENODE_PORT)
@@ -132,13 +208,15 @@ def handle_register_job(reader, writer):
   pocket.create_dir(createdirsock, None, jobid)
   #pocket.close(createdirsock)
 
-  print("TODO: generate wmask...")
-  # FIXME: generate wmask for job
-  #wmask =  [(1234, 0.1), (12345, 0.4)]
-  wmask = [(ioctlcmd.calculate_datanode_hash("10.1.88.82", 50030), 1)]
+  if jobGB == 0 or peakMbps == 0: 
+    jobGB, peakMbps = compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive)
+
+  # generate weightmask 
+  wmask = generate_weightmask(jobid, jobGB, peakMbps, latency_sensitive)
+ # wmask = [(ioctlcmd.calculate_datanode_hash("10.1.88.82", 50030), 1)]
 
   # register job in table
-  err = add_job(jobid, jobGB, jobMbps, wmask)
+  err = add_job(jobid, jobGB, peakMbps, wmask)
 
   # send wmask to metadata server   
   ioctlsock = yield from ioctlcmd.connect(NAMENODE_IP, NAMENODE_PORT)
