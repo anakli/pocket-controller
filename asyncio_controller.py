@@ -18,6 +18,7 @@ RPC_IOCTL_CMD = 13
 NN_IOCTL_CMD = 13
 RPC_JOB_CMD = 14
 JOB_CMD = 14
+UTIL_STAT_CMD = 15
 
 CMD_DEL = 2
 CMD_CREATE_DIR = 3
@@ -44,6 +45,7 @@ BYTE = 1
 REQ_STRUCT_FORMAT = "!iqhhi" # msg_len (INT), ticket (LONG LONG), cmd (SHORT), cmd_type (SHORT), register_type (INT)
 REQ_LEN_HDR = SHORT + SHORT + BYTE # CMD, CMD_TYPE, IOCTL_OPCODE (note: doesn't include msg_len or ticket from NaRPC hdr)
 MSG_LEN_HDR = INT + LONG + SHORT + SHORT + INT # MSG_LEN + TICKET + CMD, CMD_TYPE, OPCODE
+DN_LEN_HDR = INT + LONG + SHORT + 4*(INT)
 
 RESP_STRUCT_FORMAT = "!iqhhi" # msg_len (INT), ticket (LONG LONG), cmd (SHORT), error (SHORT), register_opcode (INT)
 RESP_LEN_BYTES = INT + LONG + SHORT + SHORT + INT # MSG_LEN, TICKET, CMD, ERROR, REGISTER_OPCODE 
@@ -54,6 +56,7 @@ RESP_ERR = 1
 
 hdr_req_packer = struct.Struct(REQ_STRUCT_FORMAT)
 hdr_resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
+dn_req_packer = struct.Struct("!iqhiiii")
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
 avg_util = {'cpu': 0, 'net': 0, 'DRAM': 0, 'Flash': 0}
@@ -140,6 +143,7 @@ def handle_deregister_job(reader, writer):
   if err == 0:
     # delete dir named jobid
     # NOTE: this is blocking but we are not yielding
+    # FIXME: fix bug in c++ client for deleting files and dirs!
     createdirsock = pocket.connect(NAMENODE_IP, NAMENODE_PORT)
     if createdirsock is None:
       return
@@ -155,9 +159,9 @@ def handle_deregister_job(reader, writer):
 
 
 @asyncio.coroutine
-def handle_connection(reader, writer):
+def handle_jobs(reader, writer):
   address = writer.get_extra_info('peername')
-  print('Accepted connection from {}'.format(address))
+  print('Accepted job connection from {}'.format(address))
   while True:
     hdr = yield from reader.read(MSG_LEN_HDR) 
     [msg_len, ticket, cmd, cmd_type, opcode] = hdr_req_packer.unpack(hdr)
@@ -185,6 +189,19 @@ def handle_connection(reader, writer):
     return      
 
 @asyncio.coroutine
+def handle_datanodes(reader, writer):
+  address = writer.get_extra_info('peername')
+  print('Accepted datanode connection from {}'.format(address))
+  while True:
+    hdr = yield from reader.read(DN_LEN_HDR) 
+    [msg_len, ticket, cmd, datanode_addr, rx_util, tx_util, num_cores] = dn_req_packer.unpack(hdr)
+    if cmd != UTIL_STAT_CMD:
+      print("ERROR: unknown IOCTL_CMD opcode ", opcode);
+    cpu_util = yield from reader.read(num_cores * INT)
+    cpu_util = struct.Struct("!" + "i"*num_cores).unpack(cpu_util)
+    print(datanode_addr, ticket, rx_util, tx_util, cpu_util)
+
+@asyncio.coroutine
 def send_periodically(sock):
   while True:
     yield from asyncio.sleep(GET_CAPACITY_STATS_INTERVAL)
@@ -193,7 +210,7 @@ def send_periodically(sock):
       if all_blocks:
         avg_usage = (all_blocks-free_blocks)*1.0/all_blocks
         print("Capacity usage for Tier", tier, ":", free_blocks, "free blocks out of", \
-                 all_blocks, "(", avg_usage, "% )")
+               all_blocks, "(", avg_usage, "% )")
       else:
         avg_usage = -1
       # update global avg_util dictionary
@@ -204,17 +221,25 @@ def send_periodically(sock):
 
 
 if __name__ == '__main__':
-  #address = ("localhost", 4321) 
-  address = ("10.1.47.178", 4321) 
+  
   loop = asyncio.get_event_loop()
   # Start server listening for register/deregister job connections
-  coro = asyncio.start_server(handle_connection, *address)
+  #address = ("localhost", 4321) 
+  address = ("10.1.47.178", 4321) 
+  coro = asyncio.start_server(handle_jobs, *address)
   server = loop.run_until_complete(coro)
   print('Listening at {}'.format(address))
  
   # Initialize routine to periodically send
   metadata_socket = ioctlcmd.connect_until_succeed(NAMENODE_IP, NAMENODE_PORT)
   asyncio.async(send_periodically(metadata_socket))
+
+  # Start server listening for datanode util info
+  address = ("10.1.47.178", 2345) 
+  coro = asyncio.start_server(handle_datanodes, *address)
+  server = loop.run_until_complete(coro)
+  print('Listening at {}'.format(address))
+  print("Start loop...") 
   try:
     loop.run_forever()
   finally:
