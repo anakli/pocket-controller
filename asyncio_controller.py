@@ -111,11 +111,9 @@ def remove_job(jobid):
 def handle_register_job(reader, writer):
   jobname_len = yield from reader.read(INT)
   jobname_len, = struct.Struct("!i").unpack(jobname_len)
-  jobname = yield from reader.read(jobname_len)
-  jobname, = struct.Struct("!" + str(jobname_len) + "s").unpack(jobname)
+  jobname = yield from reader.read(jobname_len + 3*INT + SHORT)
+  jobname, numlambdas, capacityMB, peakMbs, latency_sensitive = struct.Struct("!" + str(jobname_len) + "siiih").unpack(jobname)
   jobname = jobname.decode('utf-8')
-  # FIXME: receive hints
-  print("TODO: receive and use hints...")
   
   # generate jobid
   jobid_int = randint(0,1000000)
