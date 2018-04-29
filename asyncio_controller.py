@@ -14,6 +14,9 @@ STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
 GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
 AUTOSCALE_INTERVAL = 1           # in seconds
 
+WAIT_FOR_DRAM_STARTUP = 15       # in seconds
+WAIT_FOR_FLASH_STARTUP = 45      # in seconds
+
 DRAM_NODE_GB = 60
 FLASH_NODE_GB = 2000
 NODE_Mbps = 8000
@@ -66,23 +69,22 @@ hdr_resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
 dn_req_packer = struct.Struct("!iqhiiiii")
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
-datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps']).set_index(['datanodeip_port'])
+datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps','blacklisted']).set_index(['datanodeip_port'])
 datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
-avg_util = {'cpu': 0, 'net': 0, 'DRAM': 0, 'Flash': 0}
+avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0}
 
 
 # NOTE: assuming i3 and r4 2xlarge instances
 def add_datanode_provisioned(datanodeip, port, num_cpu):
   datanode = datanodeip + ":" + str(port)
-  if datanode in datanode_alloc.index.values:
+  if datanode in datanode_provisioned.index.values:
     #print("Datanode {}:{} is already in table".format(datanodeip, port))
     return 1
   if port == 50030:
-    print(datanodeip, port, num_cpu)
-    datanode_provisioned.loc[(datanodeip, port),:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=60, Flash_GB=0, blacklisted=0)
+    datanode_provisioned.loc[datanode,:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=60, Flash_GB=0, blacklisted=0)
   elif port == 1234:
-    datanode_provisioned.loc[(datanodeip, port),:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=0, Flash_GB=2000, blacklisted=0)
+    datanode_provisioned.loc[datanode,:] = dict(cpu_num=num_cpu, net_Mbps=8000, DRAM_GB=0, Flash_GB=2000, blacklisted=0)
   else:
     print("ERROR: unrecognized port! assuming 50030 for dram, 1234 for Flash/ReFlex")
 
@@ -96,7 +98,11 @@ def add_datanode_alloc(datanodeip, port):
 
 def add_datanode_usage(datanodeip, port, cpu, net):
   datanode = datanodeip + ":" + str(port)
-  datanode_usage.loc[(datanodeip, port),:] = dict(cpu=cpu, net_Mbps=net)
+  if datanode not in datanode_usage.index.values:
+    datanode_usage.loc[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0)
+  else:
+    datanode_usage.at[datanode ,'cpu'] = cpu 
+    datanode_usage.at[datanode, 'net'] = net
 
 
 def add_job(jobid, GB, Mbps, wmask):
@@ -379,7 +385,7 @@ def handle_datanodes(reader, writer):
       avg_cpu = 0
     else:
       avg_cpu = sum(cpu_util)/len(cpu_util)
-    peak_net = max(rx_util, tx_util)
+    peak_net = int(max(rx_util, tx_util)*1.0/NODE_Mbps * 100)
     # add datanode to tables
     datanode_ip = socket.inet_ntoa(struct.pack('!L', datanode_int))
     add_datanode_provisioned(datanode_ip, port, len(cpu_util))
@@ -401,17 +407,93 @@ def get_capacity_stats_periodically(sock):
         avg_usage = -1
       # update global avg_util dictionary
       if tier == 0:
-        avg_util['DRAM'] = avg_usage 
+        avg_util['dram'] = avg_usage 
       elif tier == 1:
-        avg_util['Flash'] = avg_usage 
+        avg_util['flash'] = avg_usage 
 
 
+
+@asyncio.coroutine
+def launch_dram_datanode():
+  print("TODO: launch dram datanode........")
+  yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
+  return
+
+@asyncio.coroutine
+def launch_flash_datanode():
+  print("TODO: launch flash datanode........")
+  yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
+  return
+
+
+UTIL_DRAM_LOWER_LIMIT = 70
+UTIL_DRAM_UPPER_LIMIT = 80
+UTIL_FLASH_LOWER_LIMIT = 70
+UTIL_FLASH_UPPER_LIMIT = 80
+UTIL_CPU_LOWER_LIMIT = 70
+UTIL_CPU_UPPER_LIMIT = 80
+UTIL_NET_LOWER_LIMIT = 70
+UTIL_NET_UPPER_LIMIT = 80
 @asyncio.coroutine
 def autoscale_cluster():
   while True:
     yield from asyncio.sleep(AUTOSCALE_INTERVAL)
-    # FIXME: insert logic for checking upper and lower util limits
-    #        add/remove datanodes and metadata nodes as necessary
+    # compute average
+    print(datanode_usage)
+    avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  
+    avg_util['net'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net_Mbps'].mean()  
+    print(avg_util)
+    # check datanode resource utilization and add/remove nodes as necessary
+    # TODO: do the same for metadata server utilization and metadata node scaling
+    
+    # Logic to add node... (if any resource util is above upper limit)
+    if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT:
+      # add a DRAM datanode
+      print("add a dram datanode. dram util is {}".format(avg_util['dram']))
+      yield from launch_dram_datanode()
+    elif avg_util['flash'] > UTIL_FLASH_UPPER_LIMIT:
+      # add a Flash datanode
+      print("add a reflex datanode. flash util is {}".format(avg_util['flash']))
+      yield from launch_flash_datanode()
+    elif avg_util['cpu'] > UTIL_CPU_UPPER_LIMIT:
+      # add a node to cluster
+      # need to decide between DRAM or Flash node
+      # check if CPU is higher on DRAM or Flash nodes 
+      cpu_util_dram = datanode_usage.filter(like='50030', axis=0).loc[:, 'cpu'].mean()
+      cpu_util_flash = datanode_usage.filter(like='1234', axis=0).loc[:, 'cpu'].mean()
+      if cpu_util_dram > cpu_util_flash:
+        print("add a dram datanode, cpu util is high")
+        yield from launch_dram_datanode()
+      else:
+        print("add a dram datanode, cpu util is high")
+        yield from launch_flash_datanode()
+    elif avg_util['net'] > UTIL_NET_UPPER_LIMIT:
+      # add a node to cluster
+      # need to decide between DRAM or Flash node
+      # check if network is higher on DRAM or Flash nodes
+      net_util_dram = datanode_usage.filter(like='50030', axis=0).loc[:, 'net_Mbps'].mean()
+      net_util_flash = datanode_usage.filter(like='1234', axis=0).loc[:, 'net_Mbps'].mean()
+      if net_util_dram > net_util_flash:
+        print("add a dram datanode, net util is high")
+        yield from launch_dram_datanode()
+      else:
+        print("add a dram datanode, net util is high")
+        yield from launch_flash_datanode()
+    
+    # Logic to remove node... (if all resources are below lower limit)
+    elif avg_util['cpu'] < UTIL_CPU_LOWER_LIMIT and \
+       avg_util['net'] < UTIL_NET_LOWER_LIMIT and \
+       avg_util['dram'] < UTIL_DRAM_LOWER_LIMIT and \
+       avg_util['flash'] < UTIL_FLASH_LOWER_LIMIT: 
+      # remove a node with the lowest network utilization 
+      datanodeip_port = datanode_usage['net_Mbps'].idxmin()
+      print("Datanode with lowest net or cpu usage is: ", datanodeip_port)
+      datanode_alloc.at[datanodeip_port, 'blacklisted'] = 1
+      datanode_usage.at[datanodeip_port, 'blacklisted'] = 1
+      datanode_provisioned.at[datanodeip_port, 'blacklisted'] = 1
+
+      
+    
 
 
 if __name__ == '__main__':
@@ -439,10 +521,14 @@ if __name__ == '__main__':
   print("Start loop...") 
 
   # test with dummy datanodes
-  add_datanode_alloc("10.1.88.82", "50030")
-  add_datanode_alloc("10.1.88.83", "1234")
-  add_datanode_alloc("10.1.88.84", "50030")
-  add_datanode_alloc("10.1.88.85", "1234")
+  add_datanode_alloc("10.1.88.82", 50030)
+  add_datanode_alloc("10.1.88.83", 1234)
+  add_datanode_alloc("10.1.88.84", 50030)
+  add_datanode_alloc("10.1.88.85", 1234)
+  add_datanode_usage("10.1.88.82", 50030, cpu=50, net=70)
+  add_datanode_usage("10.1.88.83", 1234, cpu=80, net=92)
+  add_datanode_usage("10.1.88.84", 50030, cpu=90, net=95)
+  add_datanode_usage("10.1.88.85", 1234, cpu=20, net=90)
 
   try:
     loop.run_forever()
