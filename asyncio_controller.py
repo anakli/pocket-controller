@@ -82,7 +82,9 @@ flash_launch_num = 0
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
 datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps','blacklisted']).set_index(['datanodeip_port'])
+datanode_usage.loc[:, ('cpu', 'net_Mbps','blacklisted')] = datanode_usage.loc[:, ('cpu', 'net_Mbps','blacklisted')].astype(int) 
 datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
+datanode_alloc.loc[:,('cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB')] = datanode_alloc.loc[:,('cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB')].astype(float) 
 datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0}
 
@@ -102,16 +104,21 @@ def add_datanode_provisioned(datanodeip, port, num_cpu):
 
 def add_datanode_alloc(datanodeip, port):
   datanode = datanodeip + ":" + str(port)
-  if datanode in datanode_alloc.index.values:
+  if datanode in datanode_alloc.index.values: 
+  #FIXME: asyncio_controller.py:105: FutureWarning: elementwise comparison failed; returning scalar instead, but in the future will perform elementwise comparison
     #print("Datanode {}:{} is already in table".format(datanodeip, port))
     return 1
-  #datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
-  datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=randint(0,10)*1.0/10, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
+  datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
+  #datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=randint(0,10)*1.0/10, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
 
 def add_datanode_usage(datanodeip, port, cpu, net):
   datanode = datanodeip + ":" + str(port)
   if datanode not in datanode_usage.index.values:
-    datanode_usage.loc[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0)
+    #datanode_usage.at[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0) #FIXME:ValueError: Must have equal len keys and value when setting with an iterable
+    print("datanode usage table got new datanode {}.".format(datanode))
+    print("index values:", datanode_usage.index.values)
+    print(datanode_usage)
+    datanode_usage.loc[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0) #FIXME:ValueError: Must have equal len keys and value when setting with an iterable
   else:
     datanode_usage.at[datanode ,'cpu'] = cpu 
     datanode_usage.at[datanode, 'net'] = net
@@ -159,13 +166,13 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   wmask = []
   # Step 1: determine if capacity or throughput bound
   if latency_sensitive:  
-    num_nodes_for_capacity = jobGB / DRAM_NODE_GB
+    num_nodes_for_capacity = math.ceil(jobGB / DRAM_NODE_GB)
   else:
-    num_nodes_for_capacity = jobGB / FLASH_NODE_GB
+    num_nodes_for_capacity = math.ceil(jobGB / FLASH_NODE_GB)
    
-  num_nodes_for_throughput = jobMbps / NODE_Mbps
+  num_nodes_for_throughput = math.ceil(jobMbps / NODE_Mbps)
 
-  if num_nodes_for_throughput > num_nodes_for_capacity:
+  if num_nodes_for_throughput >= num_nodes_for_capacity:
     print("jobid {} is throughput-bound".format(jobid))
     throughput_bound = 1
   else:
@@ -177,7 +184,7 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   if throughput_bound:
     # find all nodes that have spare Mbps 
     print(datanode_alloc)
-    spare_throughput = datanode_alloc['net_Mbps'] < 1
+    spare_throughput = datanode_alloc['net_Mbps'] < 1.0
     candidate_nodes_net = datanode_alloc[spare_throughput].sort_values(by='net_Mbps', ascending=False).loc[:, 'net_Mbps']
     spare_net_weight_alloc = 0
     job_net_weight_req = jobMbps * 1.0 / NODE_Mbps
@@ -194,11 +201,11 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       if job_net_weight_req - spare_net_weight_alloc >= 1 - net: 
         spare_net_weight_alloc += 1 - net
         print("setting datanode_alloc to 1 for datanode {}".format(node))
-        datanode_alloc.at[node,'net_Mbps'] = 1
+        datanode_alloc.at[node,'net_Mbps'] = 1.0
         wmask.append((node, 1- net))
       elif job_net_weight_req - spare_net_weight_alloc < 1 - net:
         print("setting datanode_alloc to {} for datanode {}".format(net + (job_net_weight_req - spare_net_weight_alloc),node))
-        datanode_alloc.at[node,'net_Mbps'] = net + (job_net_weight_req - spare_net_weight_alloc)
+        datanode_alloc.at[node,'net_Mbps'] = float(net + (job_net_weight_req - spare_net_weight_alloc))
         wmask.append((node, job_net_weight_req - spare_net_weight_alloc))
         spare_net_weight_alloc += job_net_weight_req - spare_net_weight_alloc
 
@@ -224,18 +231,18 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
               .format(parallelism, new_node_weights))
       # decide which kind of nodes to launch
       launch_flash = True
-      if latency_senstive and jobGB <= parallelism*DRAM_NODE_GB:
-        launch_dram_datanode(parallelism)
+      if latency_sensitive and jobGB <= parallelism*DRAM_NODE_GB:
+        yield from launch_dram_datanode(parallelism)
         launch_flash = False
       elif latency_sensitive: # but capacity doesn't fit in paralellism*DRAM nodes
         print("app is latency sensitive but high capacity, so we put {} in DRAM, rest in flash".format(FRAC_DRAM_ALLOCATION))
         print("WARNING: check logic. we should not reach this case since then app would be capacity bound!")
         num_dram_nodes = int((jobGB * FRAC_DRAM_ALLOCATION)/ DRAM_NODE_GB)
         num_flash_nodes = parallelism - num_dram_nodes
-        launch_flash_datanode(num_dram_nodes)
-        launch_flash_datanode(num_flash_nodes)
+        yield from launch_flash_datanode(num_dram_nodes)
+        yield from launch_flash_datanode(num_flash_nodes)
       else:
-        launch_flash_datanode(parallelism)
+        yield from launch_flash_datanode(parallelism)
       
       # wait for new nodes to start sending stats and add themselves to the datanode_alloc table,
       # then assign them the proper weights
@@ -421,19 +428,17 @@ def handle_datanodes(reader, writer):
   address = writer.get_extra_info('peername')
   print('Accepted datanode connection from {}'.format(address))
   while True:
-    print("Handle datanodes...")
     hdr = yield from reader.read(DN_LEN_HDR) 
-    print("read header")
     [msg_len, ticket, cmd, datanode_int, port, rx_util, tx_util, num_cores] = dn_req_packer.unpack(hdr)
     if cmd != UTIL_STAT_CMD:
       print("ERROR: unknown datanode opcode ", opcode);
     cpu_util = yield from reader.read(num_cores * INT)
-    print("read datanode usage msg")
     cpu_util = struct.Struct("!" + "i"*num_cores).unpack(cpu_util)
     if len(cpu_util) == 0:
       avg_cpu = 0
     else:
-      avg_cpu = sum(cpu_util)/len(cpu_util)
+      #avg_cpu = math.ceil(sum(cpu_util)/len(cpu_util)) # FIXME: how do we want to handle mulitple cores??
+      avg_cpu = math.ceil(cpu_util[0])  # FIXME: how do we want to handle mulitple cores??
     peak_net = int(max(rx_util, tx_util)*1.0/NODE_Mbps * 100)
     # add datanode to tables
     datanode_ip = socket.inet_ntoa(struct.pack('!L', datanode_int))
@@ -442,14 +447,14 @@ def handle_datanodes(reader, writer):
     add_datanode_usage(datanode_ip, port, avg_cpu, peak_net) 
     # TODO: should probably add timestamp field 
     #       to know when a blacklisted node dies (it stops sending updates)
-    print("Datanode usage: ", datanode_ip, port, ticket, rx_util, tx_util, cpu_util)
+    print("Datanode usage: ", datanode_ip, " cpu: ", cpu_util, " net: ", rx_util, tx_util )
+    print("Datanode usage: ", datanode_ip, " avg_cpu: ", avg_cpu, " peak net: ", peak_net )
 
 @asyncio.coroutine
 def get_capacity_stats_periodically(sock):
   while True:
     print("Get capacity stats...")
     yield from asyncio.sleep(GET_CAPACITY_STATS_INTERVAL)
-    print("wakeup from capacity stats")
     for tier in STORAGE_TIERS: 
       all_blocks, free_blocks = yield from ioctlcmd.get_class_stats(sock, tier)
       if all_blocks:
@@ -520,7 +525,7 @@ UTIL_CPU_LOWER_LIMIT = 70
 UTIL_CPU_UPPER_LIMIT = 80
 UTIL_NET_LOWER_LIMIT = 70
 UTIL_NET_UPPER_LIMIT = 80
-MIN_NUM_DATANODES = 2
+MIN_NUM_DATANODES = 1
 @asyncio.coroutine
 def autoscale_cluster():
   while True:
