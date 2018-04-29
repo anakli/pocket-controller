@@ -13,15 +13,16 @@ import sys
 import yaml
 from kubernetes import client, config
 
-NAMENODE_IP = "10.1.88.82"
+#NAMENODE_IP = "10.1.88.82"
+NAMENODE_IP = "10.1.0.10"
 NAMENODE_PORT = 9070
 
 STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
 GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
 AUTOSCALE_INTERVAL = 1           # in seconds
 
-WAIT_FOR_DRAM_STARTUP = 15       # in seconds
-WAIT_FOR_FLASH_STARTUP = 45      # in seconds
+WAIT_FOR_DRAM_STARTUP = 60 #20       # in seconds
+WAIT_FOR_FLASH_STARTUP = 60 #50      # in seconds
 FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash
                                  # if need more nodes for capacity than for throughput
 
@@ -388,7 +389,8 @@ def handle_deregister_job(reader, writer):
 def handle_jobs(reader, writer):
   address = writer.get_extra_info('peername')
   print('Accepted job connection from {}'.format(address))
-  while True:
+  while True: # FIXME: dont' need while loop here, just return after one iter
+    print("Handle jobs...")
     hdr = yield from reader.read(MSG_LEN_HDR) 
     [msg_len, ticket, cmd, cmd_type, opcode] = hdr_req_packer.unpack(hdr)
     print(msg_len, ticket, cmd, cmd_type, opcode)
@@ -419,11 +421,14 @@ def handle_datanodes(reader, writer):
   address = writer.get_extra_info('peername')
   print('Accepted datanode connection from {}'.format(address))
   while True:
+    print("Handle datanodes...")
     hdr = yield from reader.read(DN_LEN_HDR) 
+    print("read header")
     [msg_len, ticket, cmd, datanode_int, port, rx_util, tx_util, num_cores] = dn_req_packer.unpack(hdr)
     if cmd != UTIL_STAT_CMD:
       print("ERROR: unknown datanode opcode ", opcode);
     cpu_util = yield from reader.read(num_cores * INT)
+    print("read datanode usage msg")
     cpu_util = struct.Struct("!" + "i"*num_cores).unpack(cpu_util)
     if len(cpu_util) == 0:
       avg_cpu = 0
@@ -437,12 +442,14 @@ def handle_datanodes(reader, writer):
     add_datanode_usage(datanode_ip, port, avg_cpu, peak_net) 
     # TODO: should probably add timestamp field 
     #       to know when a blacklisted node dies (it stops sending updates)
-    print(datanode_ip, port, ticket, rx_util, tx_util, cpu_util)
+    print("Datanode usage: ", datanode_ip, port, ticket, rx_util, tx_util, cpu_util)
 
 @asyncio.coroutine
 def get_capacity_stats_periodically(sock):
   while True:
+    print("Get capacity stats...")
     yield from asyncio.sleep(GET_CAPACITY_STATS_INTERVAL)
+    print("wakeup from capacity stats")
     for tier in STORAGE_TIERS: 
       all_blocks, free_blocks = yield from ioctlcmd.get_class_stats(sock, tier)
       if all_blocks:
@@ -476,7 +483,9 @@ def launch_dram_datanode(parallelism):
            body=job, namespace="default")
     print("Job created. status='%s'" % str(resp.status))
   dram_launch_num = dram_launch_num+1
+  print("Wait for DRAM datanode to start...")
   yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
+  print("Done waiting for DRAM datanode to start.")
   return
 
 @asyncio.coroutine
@@ -497,7 +506,9 @@ def launch_flash_datanode(parallelism):
            body=job, namespace="default")
     print("Job created. status='%s'" % str(resp.status))
   flash_launch_num = flash_launch_num+1
+  print("Wait for flash datanode to start...")
   yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
+  print("Done waiting for flash datanode to start.")
   return
 
 # FIXME: tune these parameters empirically!
@@ -509,11 +520,13 @@ UTIL_CPU_LOWER_LIMIT = 70
 UTIL_CPU_UPPER_LIMIT = 80
 UTIL_NET_LOWER_LIMIT = 70
 UTIL_NET_UPPER_LIMIT = 80
-MIN_NUM_DATANODES = 4
+MIN_NUM_DATANODES = 2
 @asyncio.coroutine
 def autoscale_cluster():
   while True:
+    print("autoscale cluster, sleep...")
     yield from asyncio.sleep(AUTOSCALE_INTERVAL)
+    print("autoscale cluster wakeup from sleep")
     # compute average
     print(datanode_usage)
     avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  
@@ -522,11 +535,16 @@ def autoscale_cluster():
     if len(datanode_usage.index) > 0:
       num_nodes_active = int(datanode_usage.loc[datanode_usage['blacklisted'] == 0].count()[0])
     print(avg_util)
-    continue ## FIXME REMOVE ThIIIIISSSSSSS
+    
     # check datanode resource utilization and add/remove nodes as necessary
     # TODO: do the same for metadata server utilization and metadata node scaling
     
     # Logic to add node... (if any resource util is above upper limit)
+    if num_nodes_active < MIN_NUM_DATANODES:
+      print("INSUFFICIENT DATANODES IN CLUSTER! Launching {} datanodes...".format(MIN_NUM_DATANODES-num_nodes_active))
+      #yield from launch_flash_datanode(MIN_NUM_DATANODES-num_nodes_active)
+      yield from launch_dram_datanode(MIN_NUM_DATANODES-num_nodes_active)
+      print("Launched datanode. Should now have min size cluster.")
     if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT:
       # add a DRAM datanode
       print("add a dram datanode. dram util is {}".format(avg_util['dram']))
@@ -590,7 +608,7 @@ if __name__ == '__main__':
  
   # Initialize routine to periodically send
   metadata_socket = ioctlcmd.connect_until_succeed(NAMENODE_IP, NAMENODE_PORT)
-  asyncio.async(get_capacity_stats_periodically(metadata_socket))
+  asyncio.async(get_capacity_stats_periodically(metadata_socket)) # FIXME: DEBUG THIS
 
   # Periodically check avg utilization and run autoscale algorithm
   asyncio.async(autoscale_cluster())
