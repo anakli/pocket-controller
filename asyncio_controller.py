@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 import asyncio
 import struct
+import math
 import pandas as pd
 from random import randint
 import socket
 import pocket
 import pocket_metadata_cmds as ioctlcmd
+from os import path
+from subprocess import Popen, PIPE
+import sys
+import yaml
+from kubernetes import client, config
 
 NAMENODE_IP = "10.1.88.82"
 NAMENODE_PORT = 9070
@@ -16,6 +22,8 @@ AUTOSCALE_INTERVAL = 1           # in seconds
 
 WAIT_FOR_DRAM_STARTUP = 15       # in seconds
 WAIT_FOR_FLASH_STARTUP = 45      # in seconds
+FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash
+                                 # if need more nodes for capacity than for throughput
 
 DRAM_NODE_GB = 60
 FLASH_NODE_GB = 2000
@@ -67,6 +75,9 @@ RESP_ERR = 1
 hdr_req_packer = struct.Struct(REQ_STRUCT_FORMAT)
 hdr_resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
 dn_req_packer = struct.Struct("!iqhiiiii")
+
+dram_launch_num = 0
+flash_launch_num = 0
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
 datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps','blacklisted']).set_index(['datanodeip_port'])
@@ -123,10 +134,25 @@ def remove_job(jobid):
   print(job_table)
   return 0
 
+# wait until "paralellism" number of nodes have registered 
+# i.e. they have started sending util stats and are therefore in datanode_alloc table
+@asyncio.coroutine
+def wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism, flash=True):
+  if flash:
+    yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
+  else:
+    yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
+  while True:
+    yield from asyncio.sleep(1)
+    new_datanodes = datanode_alloc.index[datanode_alloc.index.isin(datanode_alloc_prelaunch.index)==False].values.tolist()
+    if len(new_datanodes) == parallelism:
+      return new_datanodes
+
 # Algorithm to generate weightmask
 # The weightmask defines the list of datanodes (including tier type) 
 # to spread this job's data across, along with an associated weight for each node
 # the weight is used for weighted random datanode block selection at the metdata server
+@asyncio.coroutine
 def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   print("generate weightmask for ", jobid, jobGB, jobMbps, latency_sensitive)
   wmask = []
@@ -192,14 +218,32 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       else:
         new_node_weights = [1 for i in range(0, int(extra_nodes_needed))]
         new_node_weights.append(last_weight)
+      parallelism = math.ceil(extra_nodes_needed)
+      print("KUBERNETES: launch {} extra nodes, wait for them to come up and assing proper weights {}"\
+              .format(parallelism, new_node_weights))
+      # decide which kind of nodes to launch
+      launch_flash = True
+      if latency_senstive and jobGB <= parallelism*DRAM_NODE_GB:
+        launch_dram_datanode(parallelism)
+        launch_flash = False
+      elif latency_sensitive: # but capacity doesn't fit in paralellism*DRAM nodes
+        print("app is latency sensitive but high capacity, so we put {} in DRAM, rest in flash".format(FRAC_DRAM_ALLOCATION))
+        print("WARNING: check logic. we should not reach this case since then app would be capacity bound!")
+        num_dram_nodes = int((jobGB * FRAC_DRAM_ALLOCATION)/ DRAM_NODE_GB)
+        num_flash_nodes = parallelism - num_dram_nodes
+        launch_flash_datanode(num_dram_nodes)
+        launch_flash_datanode(num_flash_nodes)
+      else:
+        launch_flash_datanode(parallelism)
+      
+      # wait for new nodes to start sending stats and add themselves to the datanode_alloc table,
+      # then assign them the proper weights
       datanode_alloc_prelaunch = datanode_alloc
-      print("TODO: LAUNCH {} extra nodes, wait for them to come up and assing proper weights {}"\
-              .format(extra_nodes_needed, new_node_weights))
-      #FIXME: KUBERNETES LAUNCH JOBS with parallelism=extra_nodes_needed
-      #FIXME: need to wait for new nodes to start sending stats and add themselves to the datanode_alloc table,
-      #       then assign them the proper weights
-      #TODO: have a function that monitors status of datanode_alloc and compares to old version datanode_alloc_prelaunch
-   
+      new_datanodes = yield from wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism, launch_flash)
+      i = 0
+      for n in new_datanodes:
+        wmask.append(n, new_node_weights[i])
+        i = i + 1
   
   # TODO: If capacity bound, will allocate nodes based on DRAM or Flash capacity (depending on latency sensitivity)
   else:
@@ -291,7 +335,7 @@ def handle_register_job(reader, writer):
     jobGB, peakMbps = compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive)
 
   # generate weightmask 
-  wmask = generate_weightmask(jobid, jobGB, peakMbps, latency_sensitive)
+  wmask = yield from generate_weightmask(jobid, jobGB, peakMbps, latency_sensitive)
  # wmask = [(ioctlcmd.calculate_datanode_hash("10.1.88.82", 50030), 1)]
 
   # register job in table
@@ -391,6 +435,8 @@ def handle_datanodes(reader, writer):
     add_datanode_provisioned(datanode_ip, port, len(cpu_util))
     add_datanode_alloc(datanode_ip, port) 
     add_datanode_usage(datanode_ip, port, avg_cpu, peak_net) 
+    # TODO: should probably add timestamp field 
+    #       to know when a blacklisted node dies (it stops sending updates)
     print(datanode_ip, port, ticket, rx_util, tx_util, cpu_util)
 
 @asyncio.coroutine
@@ -412,20 +458,49 @@ def get_capacity_stats_periodically(sock):
         avg_util['flash'] = avg_usage 
 
 
-
 @asyncio.coroutine
-def launch_dram_datanode():
-  print("TODO: launch dram datanode........")
+def launch_dram_datanode(parallelism):
+  print("KUBERNETES: launch dram datanode........")
+  global dram_launch_num
+  kubernetes_job_name = "pocket-datanode-dram-job" + str(dram_launch_num)
+  yaml_file = "kubernetes/pocket-datanode-dram-job.yaml"
+  cmd = ["./kubernetes/update_datanode_yaml.sh", kubernetes_job_name, str(parallelism), yaml_file] 
+  Popen(cmd, stdout=PIPE).wait()
+
+  config.load_kube_config()
+  
+  with open(path.join(path.dirname(__file__), yaml_file)) as f:
+    job = yaml.load(f)
+    k8s_beta = client.BatchV1Api()
+    resp = k8s_beta.create_namespaced_job(
+           body=job, namespace="default")
+    print("Job created. status='%s'" % str(resp.status))
+  dram_launch_num = dram_launch_num+1
   yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
   return
 
 @asyncio.coroutine
-def launch_flash_datanode():
-  print("TODO: launch flash datanode........")
+def launch_flash_datanode(parallelism):
+  print("KUBERNETES: launch flash datanode........")
+  global flash_launch_num
+  kubernetes_job_name = "pocket-datanode-nvme-job" + str(flash_launch_num)
+  yaml_file = "kubernetes/pocket-datanode-nvme-job.yaml"
+  cmd = ["./kubernetes/update_datanode_yaml.sh", kubernetes_job_name, str(parallelism), yaml_file] 
+  Popen(cmd, stdout=PIPE).wait()
+
+  config.load_kube_config()
+  
+  with open(path.join(path.dirname(__file__), yaml_file)) as f:
+    job = yaml.load(f)
+    k8s_beta = client.BatchV1Api()
+    resp = k8s_beta.create_namespaced_job(
+           body=job, namespace="default")
+    print("Job created. status='%s'" % str(resp.status))
+  flash_launch_num = flash_launch_num+1
   yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
   return
 
-
+# FIXME: tune these parameters empirically!
 UTIL_DRAM_LOWER_LIMIT = 70
 UTIL_DRAM_UPPER_LIMIT = 80
 UTIL_FLASH_LOWER_LIMIT = 70
@@ -434,6 +509,7 @@ UTIL_CPU_LOWER_LIMIT = 70
 UTIL_CPU_UPPER_LIMIT = 80
 UTIL_NET_LOWER_LIMIT = 70
 UTIL_NET_UPPER_LIMIT = 80
+MIN_NUM_DATANODES = 4
 @asyncio.coroutine
 def autoscale_cluster():
   while True:
@@ -442,7 +518,11 @@ def autoscale_cluster():
     print(datanode_usage)
     avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  
     avg_util['net'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net_Mbps'].mean()  
+    num_nodes_active = 0
+    if len(datanode_usage.index) > 0:
+      num_nodes_active = int(datanode_usage.loc[datanode_usage['blacklisted'] == 0].count()[0])
     print(avg_util)
+    continue ## FIXME REMOVE ThIIIIISSSSSSS
     # check datanode resource utilization and add/remove nodes as necessary
     # TODO: do the same for metadata server utilization and metadata node scaling
     
@@ -450,11 +530,11 @@ def autoscale_cluster():
     if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT:
       # add a DRAM datanode
       print("add a dram datanode. dram util is {}".format(avg_util['dram']))
-      yield from launch_dram_datanode()
+      yield from launch_dram_datanode(1)
     elif avg_util['flash'] > UTIL_FLASH_UPPER_LIMIT:
       # add a Flash datanode
       print("add a reflex datanode. flash util is {}".format(avg_util['flash']))
-      yield from launch_flash_datanode()
+      yield from launch_flash_datanode(1)
     elif avg_util['cpu'] > UTIL_CPU_UPPER_LIMIT:
       # add a node to cluster
       # need to decide between DRAM or Flash node
@@ -463,10 +543,10 @@ def autoscale_cluster():
       cpu_util_flash = datanode_usage.filter(like='1234', axis=0).loc[:, 'cpu'].mean()
       if cpu_util_dram > cpu_util_flash:
         print("add a dram datanode, cpu util is high")
-        yield from launch_dram_datanode()
+        yield from launch_dram_datanode(1)
       else:
         print("add a dram datanode, cpu util is high")
-        yield from launch_flash_datanode()
+        yield from launch_flash_datanode(1)
     elif avg_util['net'] > UTIL_NET_UPPER_LIMIT:
       # add a node to cluster
       # need to decide between DRAM or Flash node
@@ -475,13 +555,15 @@ def autoscale_cluster():
       net_util_flash = datanode_usage.filter(like='1234', axis=0).loc[:, 'net_Mbps'].mean()
       if net_util_dram > net_util_flash:
         print("add a dram datanode, net util is high")
-        yield from launch_dram_datanode()
+        yield from launch_dram_datanode(1)
       else:
         print("add a dram datanode, net util is high")
-        yield from launch_flash_datanode()
+        yield from launch_flash_datanode(1)
     
     # Logic to remove node... (if all resources are below lower limit)
-    elif avg_util['cpu'] < UTIL_CPU_LOWER_LIMIT and \
+    # also we want to keep at least MIN_NUM_DATANODES active in case of new jobs
+    elif num_nodes_active > MIN_NUM_DATANODES and \
+       avg_util['cpu'] < UTIL_CPU_LOWER_LIMIT and \
        avg_util['net'] < UTIL_NET_LOWER_LIMIT and \
        avg_util['dram'] < UTIL_DRAM_LOWER_LIMIT and \
        avg_util['flash'] < UTIL_FLASH_LOWER_LIMIT: 
@@ -521,14 +603,14 @@ if __name__ == '__main__':
   print("Start loop...") 
 
   # test with dummy datanodes
-  add_datanode_alloc("10.1.88.82", 50030)
-  add_datanode_alloc("10.1.88.83", 1234)
-  add_datanode_alloc("10.1.88.84", 50030)
-  add_datanode_alloc("10.1.88.85", 1234)
-  add_datanode_usage("10.1.88.82", 50030, cpu=50, net=70)
-  add_datanode_usage("10.1.88.83", 1234, cpu=80, net=92)
-  add_datanode_usage("10.1.88.84", 50030, cpu=90, net=95)
-  add_datanode_usage("10.1.88.85", 1234, cpu=20, net=90)
+  #add_datanode_alloc("10.1.88.82", 50030)
+  #add_datanode_alloc("10.1.88.83", 1234)
+  #add_datanode_alloc("10.1.88.84", 50030)
+  #add_datanode_alloc("10.1.88.85", 1234)
+  #add_datanode_usage("10.1.88.82", 50030, cpu=50, net=70)
+  #add_datanode_usage("10.1.88.83", 1234, cpu=80, net=22)
+  #add_datanode_usage("10.1.88.84", 50030, cpu=90, net=55)
+  #add_datanode_usage("10.1.88.85", 1234, cpu=20, net=50)
 
   try:
     loop.run_forever()
