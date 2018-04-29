@@ -38,11 +38,11 @@ def ip2long(ip):
     return struct.unpack("!L", packedIP)[0]
 
 
-def send_util_info(sock, cpu_util, rxbytes_per_s, txbytes_per_s):
+def send_util_info(sock, datanodeid, cpu_util, rxbytes_per_s, txbytes_per_s):
     rxMbps = rxbytes_per_s * 8 / 1e6
     txMbps = txbytes_per_s * 8 / 1e6
     log = {'timestamp': time.time(),
-            'datanodeid': socket.gethostbyname(socket.gethostname()),
+            'datanodeid': datanodeid,
             'rx': rxMbps,
             'tx': txMbps,
             'cpu': cpu_util}
@@ -53,7 +53,7 @@ def send_util_info(sock, cpu_util, rxbytes_per_s, txbytes_per_s):
 
     # NOTE: this only works for DRAM node and assumes uses port 50030
     # use different script for reflex datanode
-    ipaddr = ip2long(socket.gethostbyname(socket.gethostname())) 
+    ipaddr = ip2long(datanodeid) 
     PORT = 50030
     cpu_tuple = tuple([int(i) for i in cpu_util])
     sampleMsg = (msgLen, TICKET, UTIL_STAT_CMD, ipaddr, PORT, int(rxMbps), int(txMbps), len(cpu_util)) + cpu_tuple #  int(sum(cpu_util)/len(cpu_util)))
@@ -72,9 +72,13 @@ if __name__ == "__main__":
     # connect to controller
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((CONTROLLER_IP, CONTROLLER_PORT))
+    
+    datanodeid = [l for l in ([ip for ip in socket.gethostbyname_ex(socket.gethostname())[2] \
+                  if not ip.startswith("127.")][:1], [[(s.connect(('8.8.8.8', 53)), s.getsockname()[0], s.close()) \
+                  for s in [socket.socket(socket.AF_INET, socket.SOCK_DGRAM)]][0][1]]) if l][0][0]
 
     while(True):
         c, r, t = get_net_bytes(rxbytes, txbytes)
         time.sleep(SEND_STATS_INTERVAL)
-        send_util_info(sock, c, r, t)
+        send_util_info(sock, datanodeid, c, r, t)
 
