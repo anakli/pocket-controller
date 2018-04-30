@@ -313,7 +313,7 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     datanode_hash = ioctlcmd.calculate_datanode_hash(datanode_ip, datanode_port) 
     job_wmask.append((datanode_hash, float("{0:.2f}".format(weight))))
 
-  print(job_wmask) 
+  print("job_wmask is:", job_wmask) 
   return job_wmask
 
 def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
@@ -456,14 +456,6 @@ def handle_jobs(reader, writer):
       else:
         print("ERROR: unknown JOB_CMD opcode ", opcode);
 
-    if cmd == RPC_IOCTL_CMD:
-      if opcode == DN_REMOVE_OPCODE:
-        print("Remove datanode...")
-      elif opcode == GET_CLASS_STATS_OPCODE:
-        print("Get capacity stats...")
-      else:
-        print("ERROR: unknown IOCTL_CMD opcode ", opcode);
-    
     return      
 
 @asyncio.coroutine
@@ -490,13 +482,13 @@ def handle_datanodes(reader, writer):
     add_datanode_usage(datanode_ip, port, avg_cpu, peak_net) 
     # TODO: should probably add timestamp field 
     #       to know when a blacklisted node dies (it stops sending updates)
-    print("Datanode usage: ", datanode_ip, " cpu: ", cpu_util, " net: ", rx_util, tx_util )
+    #print("Datanode usage: ", datanode_ip, " cpu: ", cpu_util, " net: ", rx_util, tx_util )
     print("Datanode usage: ", datanode_ip, " avg_cpu: ", avg_cpu, " peak net: ", peak_net )
 
 @asyncio.coroutine
 def get_capacity_stats_periodically(sock):
   while True:
-    print("Get capacity stats...")
+    #print("Get capacity stats...")
     yield from asyncio.sleep(GET_CAPACITY_STATS_INTERVAL)
     for tier in STORAGE_TIERS: 
       all_blocks, free_blocks = yield from ioctlcmd.get_class_stats(sock, tier)
@@ -526,9 +518,9 @@ MIN_NUM_DATANODES = 1
 @asyncio.coroutine
 def autoscale_cluster():
   while True:
-    print("autoscale cluster, sleep...")
+    #print("autoscale cluster, sleep...")
     yield from asyncio.sleep(AUTOSCALE_INTERVAL)
-    print("autoscale cluster wakeup from sleep")
+    #print("autoscale cluster wakeup from sleep")
     # compute average
     print(datanode_usage)
     avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  

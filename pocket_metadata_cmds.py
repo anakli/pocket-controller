@@ -3,6 +3,7 @@ import os
 import struct
 import errno
 import asyncio
+import numpy as np
 from functools import reduce
 
 #HOSTNAME = "10.1.88.82"
@@ -58,16 +59,16 @@ def java_array_hash(array):
     return 0;
   result = 1
   for a in array:
-    result = 31 * result + a
+    result = 31 * result + np.int8(a)
   return result
 
 def calculate_datanode_hash(ipaddr, port):
   iparray = ipaddr.split(".")
   iparray = [int(i) for i in iparray]
   hashcode = java_array_hash(iparray)
-  hash = ((hashcode << 32) | (port & 0xffffffff))
-  #print("Hash of ", ipaddr, ":", port, " is ", hash)
-  return hash
+  hashnum = ((hashcode << 32) | (port & 0xffffffff))
+  #print("Hash of ", ipaddr, ":", port, " is ", hashnum)
+  return hashnum
   
 # tokenize filename into FileName representation for Pocket
 # e.g., "/abc/def" --> "/1234/2313/0/0/0/0/0/0/0/0/0/0/0/0/0
@@ -123,8 +124,8 @@ def send_weightmask(socket, jobdir, wmasklist):
   data = socket.recv(RESP_LEN_IOCTL_BYTES + INT) 
   resp_packer = struct.Struct(RESP_STRUCT_FORMAT_IOCTL + "i")
   [length, ticket, type_, err, opcode, ecode] = resp_packer.unpack(data)
-  if err != 0:
-    print("Error setting weightmask: ", err)
+  if err != 0 and ecode !=0:
+    print("Error setting weightmask: ", err, ecode)
   else:
     print("Set weightmask for dir ", jobdir)
   return
