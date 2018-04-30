@@ -21,7 +21,7 @@ STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
 GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
 AUTOSCALE_INTERVAL = 1           # in seconds
 
-WAIT_FOR_DRAM_STARTUP = 60 #20       # in seconds
+WAIT_FOR_DRAM_STARTUP = 20 #20       # in seconds
 WAIT_FOR_FLASH_STARTUP = 60 #50      # in seconds
 FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash
                                  # if need more nodes for capacity than for throughput
@@ -142,17 +142,60 @@ def remove_job(jobid):
   print(job_table)
   return 0
 
+@asyncio.coroutine
+def launch_dram_datanode(parallelism):
+  print("KUBERNETES: launch dram datanode........")
+  global dram_launch_num
+  kubernetes_job_name = "pocket-datanode-dram-job" + str(dram_launch_num)
+  yaml_file = "kubernetes/pocket-datanode-dram-job.yaml"
+  cmd = ["./kubernetes/update_datanode_yaml.sh", kubernetes_job_name, str(parallelism), yaml_file] 
+  Popen(cmd, stdout=PIPE).wait()
+
+  config.load_kube_config()
+  
+  with open(path.join(path.dirname(__file__), yaml_file)) as f:
+    job = yaml.load(f)
+    k8s_beta = client.BatchV1Api()
+    resp = k8s_beta.create_namespaced_job(
+           body=job, namespace="default")
+    print("Job created. status='%s'" % str(resp.status))
+  dram_launch_num = dram_launch_num+1
+  print("Wait for DRAM datanode to start...")
+  yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
+  print("Done waiting for DRAM datanode to start.")
+  return
+
+@asyncio.coroutine
+def launch_flash_datanode(parallelism):
+  print("KUBERNETES: launch flash datanode........")
+  global flash_launch_num
+  kubernetes_job_name = "pocket-datanode-nvme-job" + str(flash_launch_num)
+  yaml_file = "kubernetes/pocket-datanode-nvme-job.yaml"
+  cmd = ["./kubernetes/update_datanode_yaml.sh", kubernetes_job_name, str(parallelism), yaml_file] 
+  Popen(cmd, stdout=PIPE).wait()
+
+  config.load_kube_config()
+  
+  with open(path.join(path.dirname(__file__), yaml_file)) as f:
+    job = yaml.load(f)
+    k8s_beta = client.BatchV1Api()
+    resp = k8s_beta.create_namespaced_job(
+           body=job, namespace="default")
+    print("Job created. status='%s'" % str(resp.status))
+  flash_launch_num = flash_launch_num+1
+  print("Wait for flash datanode to start...")
+  yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
+  print("Done waiting for flash datanode to start.")
+  return
+
 # wait until "paralellism" number of nodes have registered 
 # i.e. they have started sending util stats and are therefore in datanode_alloc table
 @asyncio.coroutine
-def wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism, flash=True):
-  if flash:
-    yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
-  else:
-    yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
+def wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism):
   while True:
     yield from asyncio.sleep(1)
     new_datanodes = datanode_alloc.index[datanode_alloc.index.isin(datanode_alloc_prelaunch.index)==False].values.tolist()
+    print("New datanodes: {}".format(new_datanodes))
     if len(new_datanodes) == parallelism:
       return new_datanodes
 
@@ -215,10 +258,14 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       if spare_net_weight_alloc > job_net_weight_req:
         print("ERROR: shouldn't be allocating more than job needs! something went wrong...")
         break
+    
     if spare_net_weight_alloc == job_net_weight_req:
       print("Satisified job without needing to launch new nodes :)")
       print(datanode_alloc)
     else:
+      print("WAITING FOR DATANODE(S) to join....")
+      datanode_alloc_prelaunch = datanode_alloc.copy()
+      print("old datanode_alloc: ", datanode_alloc_prelaunch)
       extra_nodes_needed = (job_net_weight_req - spare_net_weight_alloc)
       last_weight = extra_nodes_needed - int(extra_nodes_needed)
       if last_weight == 0:
@@ -230,10 +277,8 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       print("KUBERNETES: launch {} extra nodes, wait for them to come up and assing proper weights {}"\
               .format(parallelism, new_node_weights))
       # decide which kind of nodes to launch
-      launch_flash = True
       if latency_sensitive and jobGB <= parallelism*DRAM_NODE_GB:
         yield from launch_dram_datanode(parallelism)
-        launch_flash = False
       elif latency_sensitive: # but capacity doesn't fit in paralellism*DRAM nodes
         print("app is latency sensitive but high capacity, so we put {} in DRAM, rest in flash".format(FRAC_DRAM_ALLOCATION))
         print("WARNING: check logic. we should not reach this case since then app would be capacity bound!")
@@ -246,12 +291,15 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       
       # wait for new nodes to start sending stats and add themselves to the datanode_alloc table,
       # then assign them the proper weights
-      datanode_alloc_prelaunch = datanode_alloc
-      new_datanodes = yield from wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism, launch_flash)
+      print("old datanode_alloc: ", datanode_alloc_prelaunch)
+      print("current datanode_alloc: ", datanode_alloc)
+      new_datanodes = yield from wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism)
+      print("datanodes {} have joined!".format(new_datanodes))
       i = 0
       for n in new_datanodes:
-        wmask.append(n, new_node_weights[i])
+        wmask.append((n, new_node_weights[i]))
         i = i + 1
+      print("wmask:", wmask)
   
   # TODO: If capacity bound, will allocate nodes based on DRAM or Flash capacity (depending on latency sensitivity)
   else:
@@ -469,52 +517,6 @@ def get_capacity_stats_periodically(sock):
       elif tier == 1:
         avg_util['flash'] = avg_usage 
 
-
-@asyncio.coroutine
-def launch_dram_datanode(parallelism):
-  print("KUBERNETES: launch dram datanode........")
-  global dram_launch_num
-  kubernetes_job_name = "pocket-datanode-dram-job" + str(dram_launch_num)
-  yaml_file = "kubernetes/pocket-datanode-dram-job.yaml"
-  cmd = ["./kubernetes/update_datanode_yaml.sh", kubernetes_job_name, str(parallelism), yaml_file] 
-  Popen(cmd, stdout=PIPE).wait()
-
-  config.load_kube_config()
-  
-  with open(path.join(path.dirname(__file__), yaml_file)) as f:
-    job = yaml.load(f)
-    k8s_beta = client.BatchV1Api()
-    resp = k8s_beta.create_namespaced_job(
-           body=job, namespace="default")
-    print("Job created. status='%s'" % str(resp.status))
-  dram_launch_num = dram_launch_num+1
-  print("Wait for DRAM datanode to start...")
-  yield from asyncio.sleep(WAIT_FOR_DRAM_STARTUP)
-  print("Done waiting for DRAM datanode to start.")
-  return
-
-@asyncio.coroutine
-def launch_flash_datanode(parallelism):
-  print("KUBERNETES: launch flash datanode........")
-  global flash_launch_num
-  kubernetes_job_name = "pocket-datanode-nvme-job" + str(flash_launch_num)
-  yaml_file = "kubernetes/pocket-datanode-nvme-job.yaml"
-  cmd = ["./kubernetes/update_datanode_yaml.sh", kubernetes_job_name, str(parallelism), yaml_file] 
-  Popen(cmd, stdout=PIPE).wait()
-
-  config.load_kube_config()
-  
-  with open(path.join(path.dirname(__file__), yaml_file)) as f:
-    job = yaml.load(f)
-    k8s_beta = client.BatchV1Api()
-    resp = k8s_beta.create_namespaced_job(
-           body=job, namespace="default")
-    print("Job created. status='%s'" % str(resp.status))
-  flash_launch_num = flash_launch_num+1
-  print("Wait for flash datanode to start...")
-  yield from asyncio.sleep(WAIT_FOR_FLASH_STARTUP)
-  print("Done waiting for flash datanode to start.")
-  return
 
 # FIXME: tune these parameters empirically!
 UTIL_DRAM_LOWER_LIMIT = 70
