@@ -195,7 +195,6 @@ def wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism):
   while True:
     yield from asyncio.sleep(1)
     new_datanodes = datanode_alloc.index[datanode_alloc.index.isin(datanode_alloc_prelaunch.index)==False].values.tolist()
-    print("New datanodes: {}".format(new_datanodes))
     if len(new_datanodes) == parallelism:
       return new_datanodes
 
@@ -263,9 +262,7 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       print("Satisified job without needing to launch new nodes :)")
       print(datanode_alloc)
     else:
-      print("WAITING FOR DATANODE(S) to join....")
       datanode_alloc_prelaunch = datanode_alloc.copy()
-      print("old datanode_alloc: ", datanode_alloc_prelaunch)
       extra_nodes_needed = (job_net_weight_req - spare_net_weight_alloc)
       last_weight = extra_nodes_needed - int(extra_nodes_needed)
       if last_weight == 0:
@@ -291,8 +288,6 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       
       # wait for new nodes to start sending stats and add themselves to the datanode_alloc table,
       # then assign them the proper weights
-      print("old datanode_alloc: ", datanode_alloc_prelaunch)
-      print("current datanode_alloc: ", datanode_alloc)
       new_datanodes = yield from wait_for_datanodes_to_join(datanode_alloc_prelaunch, parallelism)
       print("datanodes {} have joined!".format(new_datanodes))
       i = 0
