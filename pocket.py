@@ -53,7 +53,7 @@ def register_job(jobname, num_lambdas=0, capacityGB=0, peakMbps=0, latency_sensi
   msg_packer = struct.Struct(REQ_STRUCT_FORMAT + "i" + str(len(jobname)) + "s" + "iiih") 
   msgLen = REQ_LEN_HDR + INT + len(jobname) + 3*INT + SHORT
   sampleMsg = (msgLen, TICKET, RPC_JOB_CMD, JOB_CMD, REGISTER_OPCODE, len(jobname), jobname, \
-                 num_lambdas, capacityGB, peakMbps, latency_sensitive)
+                 num_lambdas, int(capacityGB), int(peakMbps), latency_sensitive)
   pkt = msg_packer.pack(*sampleMsg)
   sock.sendall(pkt)
 
