@@ -126,10 +126,11 @@ Launch a metadata (namenode) deployemnt. The deployment is defined in `pocket-na
 python deploy_pocket_namenode.py
 ```
 
-Now deploy datanode, defined in `pocket-datanode-dram-deployment.yaml`:
+Now launch the controller, it automatically launch datanodes with the spec defined in `pocket-datanode-dram-job.yaml`:
 
 ```
-python deploy_pocket_datanode.py
+cd ..
+python3 asyncio_controller.py
 ```
 
 Check status and other useful commands:
