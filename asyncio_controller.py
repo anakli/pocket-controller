@@ -12,6 +12,7 @@ from subprocess import Popen, PIPE
 import sys
 import yaml
 from kubernetes import client, config
+import time
 
 #NAMENODE_IP = "10.1.88.82"
 NAMENODE_IP = "10.1.0.10"
@@ -21,10 +22,12 @@ STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
 GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
 AUTOSCALE_INTERVAL = 1           # in seconds
 
-WAIT_FOR_DRAM_STARTUP = 20 #20       # in seconds
+WAIT_FOR_DRAM_STARTUP = 20       # in seconds
 WAIT_FOR_FLASH_STARTUP = 60 #50      # in seconds
 FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash
                                  # if need more nodes for capacity than for throughput
+
+BLOCKSIZE = 65536
 
 DRAM_NODE_GB = 60
 FLASH_NODE_GB = 2000
@@ -86,7 +89,7 @@ datanode_usage.loc[:, ('cpu', 'net_Mbps','blacklisted')] = datanode_usage.loc[:,
 datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 datanode_alloc.loc[:,('cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB')] = datanode_alloc.loc[:,('cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB')].astype(float) 
 datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
-avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0}
+avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0, 'net_aggr':0, 'dram_totalGB': 0, 'dram_usedGB':0}
 
 
 # NOTE: assuming i3 and r4 2xlarge instances
@@ -121,7 +124,7 @@ def add_datanode_usage(datanodeip, port, cpu, net):
     datanode_usage.loc[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0) #FIXME:ValueError: Must have equal len keys and value when setting with an iterable
   else:
     datanode_usage.at[datanode ,'cpu'] = cpu 
-    datanode_usage.at[datanode, 'net'] = net
+    datanode_usage.at[datanode, 'net_Mbps'] = net
 
 
 def add_job(jobid, GB, Mbps, wmask):
@@ -493,7 +496,7 @@ def get_capacity_stats_periodically(sock):
     for tier in STORAGE_TIERS: 
       all_blocks, free_blocks = yield from ioctlcmd.get_class_stats(sock, tier)
       if all_blocks:
-        avg_usage = (all_blocks-free_blocks)*1.0/all_blocks
+        avg_usage = (all_blocks-free_blocks)*100.0/all_blocks
         print("Capacity usage for Tier", tier, ":", free_blocks, "free blocks out of", \
                all_blocks, "(", avg_usage, "% )")
       else:
@@ -501,22 +504,24 @@ def get_capacity_stats_periodically(sock):
       # update global avg_util dictionary
       if tier == 0:
         avg_util['dram'] = avg_usage 
+        avg_util['dram_totalGB'] = all_blocks*BLOCKSIZE *1.0 /1e9 
+        avg_util['dram_usedGB'] = (all_blocks - free_blocks)*BLOCKSIZE * 1.0 / 1e9
       elif tier == 1:
         avg_util['flash'] = avg_usage 
 
 
 # FIXME: tune these parameters empirically!
-UTIL_DRAM_LOWER_LIMIT = 70
-UTIL_DRAM_UPPER_LIMIT = 80
-UTIL_FLASH_LOWER_LIMIT = 70
-UTIL_FLASH_UPPER_LIMIT = 80
-UTIL_CPU_LOWER_LIMIT = 70
-UTIL_CPU_UPPER_LIMIT = 80
-UTIL_NET_LOWER_LIMIT = 70
-UTIL_NET_UPPER_LIMIT = 80
+UTIL_DRAM_LOWER_LIMIT = 50 #70
+UTIL_DRAM_UPPER_LIMIT = 101 #80
+UTIL_FLASH_LOWER_LIMIT = 50 #70
+UTIL_FLASH_UPPER_LIMIT = 101 #80 #FIXME
+UTIL_CPU_LOWER_LIMIT = 50 #70
+UTIL_CPU_UPPER_LIMIT = 101 #80
+UTIL_NET_LOWER_LIMIT = 50 #70
+UTIL_NET_UPPER_LIMIT = 101 #80
 MIN_NUM_DATANODES = 1
 @asyncio.coroutine
-def autoscale_cluster():
+def autoscale_cluster(logfile):
   while True:
     #print("autoscale cluster, sleep...")
     yield from asyncio.sleep(AUTOSCALE_INTERVAL)
@@ -524,11 +529,17 @@ def autoscale_cluster():
     # compute average
     print(datanode_usage)
     avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  
-    avg_util['net'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net_Mbps'].mean()  
+    avg_util['net_aggr'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net_Mbps'].sum()  
     num_nodes_active = 0
     if len(datanode_usage.index) > 0:
       num_nodes_active = int(datanode_usage.loc[datanode_usage['blacklisted'] == 0].count()[0])
+    allocated_net = num_nodes_active * NODE_Mbps
+    if num_nodes_active == 0:
+      avg_util['net'] = 0
+    else:
+      avg_util['net'] = avg_util['net_aggr'] / allocated_net * 100
     print(avg_util)
+    print(time.time(), avg_util['net_aggr'], avg_util['cpu'], avg_util['dram_usedGB'], allocated_net, avg_util['dram_totalGB'], file=logfile) 
     
     # check datanode resource utilization and add/remove nodes as necessary
     # TODO: do the same for metadata server utilization and metadata node scaling
@@ -602,10 +613,12 @@ if __name__ == '__main__':
  
   # Initialize routine to periodically send
   metadata_socket = ioctlcmd.connect_until_succeed(NAMENODE_IP, NAMENODE_PORT)
-  asyncio.async(get_capacity_stats_periodically(metadata_socket)) # FIXME: DEBUG THIS
+  asyncio.async(get_capacity_stats_periodically(metadata_socket))
 
   # Periodically check avg utilization and run autoscale algorithm
-  asyncio.async(autoscale_cluster())
+  logfile = open("resource_util.log", "w+")
+  print("time", "net_usedMbps", "avg_cpu", "dram_usedGB", "net_allocMbps", "dram_allocGB", file=logfile)  
+  asyncio.async(autoscale_cluster(logfile))
  
   # Start server listening for datanode util info
   address = ("10.1.47.178", 2345) 
@@ -613,6 +626,7 @@ if __name__ == '__main__':
   server = loop.run_until_complete(coro)
   print('Listening at {}'.format(address))
   print("Start loop...") 
+
 
   # test with dummy datanodes
   #add_datanode_alloc("10.1.88.82", 50030)
