@@ -84,10 +84,10 @@ dram_launch_num = 0
 flash_launch_num = 0
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
-datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps','blacklisted']).set_index(['datanodeip_port'])
-datanode_usage.loc[:, ('cpu', 'net_Mbps','blacklisted')] = datanode_usage.loc[:, ('cpu', 'net_Mbps','blacklisted')].astype(int) 
-datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
-datanode_alloc.loc[:,('cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB')] = datanode_alloc.loc[:,('cpu', 'net_Mbps', 'DRAM_GB', 'Flash_GB')].astype(float) 
+datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net','blacklisted']).set_index(['datanodeip_port'])
+datanode_usage.loc[:, ('cpu', 'net','blacklisted')] = datanode_usage.loc[:, ('cpu', 'net','blacklisted')].astype(int) 
+datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
+datanode_alloc.loc[:,('cpu', 'net', 'DRAM_GB', 'Flash_GB')] = datanode_alloc.loc[:,('cpu', 'net', 'DRAM_GB', 'Flash_GB')].astype(float) 
 datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0, 'net_aggr':0, 'dram_totalGB': 0, 'dram_usedGB':0}
 
@@ -108,23 +108,19 @@ def add_datanode_provisioned(datanodeip, port, num_cpu):
 def add_datanode_alloc(datanodeip, port):
   datanode = datanodeip + ":" + str(port)
   if datanode in datanode_alloc.index.values: 
-  #FIXME: asyncio_controller.py:105: FutureWarning: elementwise comparison failed; returning scalar instead, but in the future will perform elementwise comparison
-    #print("Datanode {}:{} is already in table".format(datanodeip, port))
     return 1
-  datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
-  #datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net_Mbps=randint(0,10)*1.0/10, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
+  datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
 
 def add_datanode_usage(datanodeip, port, cpu, net):
   datanode = datanodeip + ":" + str(port)
   if datanode not in datanode_usage.index.values:
-    #datanode_usage.at[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0) #FIXME:ValueError: Must have equal len keys and value when setting with an iterable
     print("datanode usage table got new datanode {}.".format(datanode))
     print("index values:", datanode_usage.index.values)
     print(datanode_usage)
-    datanode_usage.loc[datanode,:] = dict(cpu=cpu, net_Mbps=net, blacklisted=0) #FIXME:ValueError: Must have equal len keys and value when setting with an iterable
+    datanode_usage.loc[datanode,:] = dict(cpu=cpu, nets=net, blacklisted=0)
   else:
     datanode_usage.at[datanode ,'cpu'] = cpu 
-    datanode_usage.at[datanode, 'net_Mbps'] = net
+    datanode_usage.at[datanode, 'net'] = net
 
 
 def add_job(jobid, GB, Mbps, wmask):
@@ -229,8 +225,8 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   if throughput_bound:
     # find all nodes that have spare Mbps 
     print(datanode_alloc)
-    spare_throughput = datanode_alloc['net_Mbps'] < 1.0
-    candidate_nodes_net = datanode_alloc[spare_throughput].sort_values(by='net_Mbps', ascending=False).loc[:, 'net_Mbps']
+    spare_throughput = datanode_alloc['net'] < 1.0
+    candidate_nodes_net = datanode_alloc[spare_throughput].sort_values(by='net', ascending=False).loc[:, 'net']
     spare_net_weight_alloc = 0
     job_net_weight_req = jobMbps * 1.0 / NODE_Mbps
     print(candidate_nodes_net)
@@ -246,11 +242,11 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       if job_net_weight_req - spare_net_weight_alloc >= 1 - net: 
         spare_net_weight_alloc += 1 - net
         print("setting datanode_alloc to 1 for datanode {}".format(node))
-        datanode_alloc.at[node,'net_Mbps'] = 1.0
+        datanode_alloc.at[node,'net'] = 1.0
         wmask.append((node, 1- net))
       elif job_net_weight_req - spare_net_weight_alloc < 1 - net:
         print("setting datanode_alloc to {} for datanode {}".format(net + (job_net_weight_req - spare_net_weight_alloc),node))
-        datanode_alloc.at[node,'net_Mbps'] = float(net + (job_net_weight_req - spare_net_weight_alloc))
+        datanode_alloc.at[node,'net'] = float(net + (job_net_weight_req - spare_net_weight_alloc))
         wmask.append((node, job_net_weight_req - spare_net_weight_alloc))
         spare_net_weight_alloc += job_net_weight_req - spare_net_weight_alloc
 
@@ -512,14 +508,15 @@ def get_capacity_stats_periodically(sock):
 
 # FIXME: tune these parameters empirically!
 UTIL_DRAM_LOWER_LIMIT = 50 #70
-UTIL_DRAM_UPPER_LIMIT = 101 #80
+UTIL_DRAM_UPPER_LIMIT = 80
 UTIL_FLASH_LOWER_LIMIT = 50 #70
-UTIL_FLASH_UPPER_LIMIT = 101 #80 #FIXME
+UTIL_FLASH_UPPER_LIMIT = 80
 UTIL_CPU_LOWER_LIMIT = 50 #70
-UTIL_CPU_UPPER_LIMIT = 101 #80
+UTIL_CPU_UPPER_LIMIT = 80 
 UTIL_NET_LOWER_LIMIT = 50 #70
-UTIL_NET_UPPER_LIMIT = 101 #80
+UTIL_NET_UPPER_LIMIT = 80
 MIN_NUM_DATANODES = 1
+MAX_NUM_DATANODES = 1
 @asyncio.coroutine
 def autoscale_cluster(logfile):
   while True:
@@ -529,7 +526,7 @@ def autoscale_cluster(logfile):
     # compute average
     print(datanode_usage)
     avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  
-    avg_util['net_aggr'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net_Mbps'].sum()  
+    avg_util['net_aggr'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net'].sum() * NODE_Mbps / 100
     num_nodes_active = 0
     if len(datanode_usage.index) > 0:
       num_nodes_active = int(datanode_usage.loc[datanode_usage['blacklisted'] == 0].count()[0])
@@ -550,15 +547,15 @@ def autoscale_cluster(logfile):
       #yield from launch_flash_datanode(MIN_NUM_DATANODES-num_nodes_active)
       yield from launch_dram_datanode(MIN_NUM_DATANODES-num_nodes_active)
       print("Launched datanode. Should now have min size cluster.")
-    if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT:
+    if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
       # add a DRAM datanode
       print("add a dram datanode. dram util is {}".format(avg_util['dram']))
       yield from launch_dram_datanode(1)
-    elif avg_util['flash'] > UTIL_FLASH_UPPER_LIMIT:
+    elif avg_util['flash'] > UTIL_FLASH_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
       # add a Flash datanode
       print("add a reflex datanode. flash util is {}".format(avg_util['flash']))
       yield from launch_flash_datanode(1)
-    elif avg_util['cpu'] > UTIL_CPU_UPPER_LIMIT:
+    elif avg_util['cpu'] > UTIL_CPU_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
       # add a node to cluster
       # need to decide between DRAM or Flash node
       # check if CPU is higher on DRAM or Flash nodes 
@@ -570,12 +567,12 @@ def autoscale_cluster(logfile):
       else:
         print("add a dram datanode, cpu util is high")
         yield from launch_flash_datanode(1)
-    elif avg_util['net'] > UTIL_NET_UPPER_LIMIT:
+    elif avg_util['net'] > UTIL_NET_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
       # add a node to cluster
       # need to decide between DRAM or Flash node
       # check if network is higher on DRAM or Flash nodes
-      net_util_dram = datanode_usage.filter(like='50030', axis=0).loc[:, 'net_Mbps'].mean()
-      net_util_flash = datanode_usage.filter(like='1234', axis=0).loc[:, 'net_Mbps'].mean()
+      net_util_dram = datanode_usage.filter(like='50030', axis=0).loc[:, 'net'].mean()
+      net_util_flash = datanode_usage.filter(like='1234', axis=0).loc[:, 'net'].mean()
       if net_util_dram > net_util_flash:
         print("add a dram datanode, net util is high")
         yield from launch_dram_datanode(1)
@@ -591,7 +588,7 @@ def autoscale_cluster(logfile):
        avg_util['dram'] < UTIL_DRAM_LOWER_LIMIT and \
        avg_util['flash'] < UTIL_FLASH_LOWER_LIMIT: 
       # remove a node with the lowest network utilization 
-      datanodeip_port = datanode_usage['net_Mbps'].idxmin()
+      datanodeip_port = datanode_usage['net'].idxmin()
       print("Datanode with lowest net or cpu usage is: ", datanodeip_port)
       datanode_alloc.at[datanodeip_port, 'blacklisted'] = 1
       datanode_usage.at[datanodeip_port, 'blacklisted'] = 1
