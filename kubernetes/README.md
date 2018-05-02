@@ -64,7 +64,7 @@ export KOPS_STATE_STORE=s3://pocket-kubernetes-statestore
 
 ```
 
-Edit `pocketcluster.k8s.local.yaml` fields for `configBase` and `networkID` to have your S3 statestore bucket and VPC ID.
+Edit `pocketcluster.k8s.local.yaml` fields for `configBase` and `networkID` to have your S3 statestore bucket and VPC ID, and `id` and `egress` for your subnet ID and NAT gateway ID.
 
 Start cluster (launch instances with kubernetes services running, e.g., kubernetes API, master with kube ctrlr, nodes with kubelet agents). The cluster config is defined in `pocketcluster.k8s.local.yaml`.
 
