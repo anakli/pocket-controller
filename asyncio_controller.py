@@ -83,7 +83,7 @@ dn_req_packer = struct.Struct("!iqhiiiii")
 dram_launch_num = 0
 flash_launch_num = 0
 
-job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask']).set_index('jobid')
+job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask', 'wmask_str']).set_index('jobid')
 datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net','blacklisted']).set_index(['datanodeip_port'])
 datanode_usage.loc[:, ('cpu', 'net','blacklisted')] = datanode_usage.loc[:, ('cpu', 'net','blacklisted')].astype(int) 
 datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
@@ -123,11 +123,11 @@ def add_datanode_usage(datanodeip, port, cpu, net):
     datanode_usage.at[datanode, 'net'] = net
 
 
-def add_job(jobid, GB, Mbps, wmask):
+def add_job(jobid, GB, Mbps, wmask, wmask_str):
   if jobid in job_table.index.values:
     print("ERROR: jobid {} already exists!".format(jobid))
     return 1
-  job_table.loc[jobid,:] = dict(GB=GB, Mbps=Mbps, wmask=wmask) 
+  job_table.loc[jobid,:] = dict(GB=GB, Mbps=Mbps, wmask=wmask, wmask_str=wmask_str) 
   print("Adding job " + jobid)
   print(job_table)
   return 0
@@ -224,18 +224,18 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   # If throughput bound, will allocate nodes based on CPU and network demand 
   if throughput_bound:
     # find all nodes that have spare Mbps 
-    print(datanode_alloc)
+    #print(datanode_alloc)
     spare_throughput = datanode_alloc['net'] < 1.0
     candidate_nodes_net = datanode_alloc[spare_throughput].sort_values(by='net', ascending=False).loc[:, 'net']
     spare_net_weight_alloc = 0
     job_net_weight_req = jobMbps * 1.0 / NODE_Mbps
-    print(candidate_nodes_net)
+    #print(candidate_nodes_net)
 
     print("job net weight req {}, this is {} Mbps".format(job_net_weight_req, jobMbps))
     # smallest fit first algorithm: fill in smallest gap first
     for node in candidate_nodes_net.index: 
       net = candidate_nodes_net[node]
-      print("net for node {} is {}".format(node, net))
+      #print("net for node {} is {}".format(node, net))
       if net == 1.0:
         continue
       #TODO: before decide to use a node, also much check weight*capacity satisfies capacity constraint!
@@ -259,13 +259,13 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     
     if spare_net_weight_alloc == job_net_weight_req:
       print("Satisified job without needing to launch new nodes :)")
-      print(datanode_alloc)
+      #print(datanode_alloc)
     else:
       datanode_alloc_prelaunch = datanode_alloc.copy()
       extra_nodes_needed = (job_net_weight_req - spare_net_weight_alloc)
       last_weight = extra_nodes_needed - int(extra_nodes_needed)
       if last_weight == 0:
-        new_node_weights = [1 for i in range(0, extra_nodes_needed)]
+        new_node_weights = [1 for i in range(0, int(extra_nodes_needed))]
       else:
         new_node_weights = [1 for i in range(0, int(extra_nodes_needed))]
         new_node_weights.append(last_weight)
@@ -312,8 +312,8 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     datanode_hash = ioctlcmd.calculate_datanode_hash(datanode_ip, datanode_port) 
     job_wmask.append((datanode_hash, float("{0:.2f}".format(weight))))
 
-  print("job_wmask is:", job_wmask) 
-  return job_wmask
+  print("job_wmask is:", wmask) 
+  return job_wmask, wmask
 
 def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
 
@@ -362,6 +362,7 @@ def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
 
 @asyncio.coroutine
 def handle_register_job(reader, writer):
+  print("-------------------------- REGISTER JOB --------------------------------")
   jobname_len = yield from reader.read(INT)
   jobname_len, = struct.Struct("!i").unpack(jobname_len)
   jobname = yield from reader.read(jobname_len + 3*INT + SHORT)
@@ -369,8 +370,12 @@ def handle_register_job(reader, writer):
   jobname = jobname.decode('utf-8')
   
   # generate jobid
-  jobid_int = randint(0,1000000)
-  jobid = jobname + "-" + str(jobid_int)
+  if 'gg' in jobname:
+    jobid = jobname + '-1234'
+    jobid_int = 1234
+  else:
+    jobid_int = randint(0,1000000)
+    jobid = jobname + "-" + str(jobid_int)
 
   print("received hints ", jobid, num_lambdas, jobGB, peakMbps, latency_sensitive) 
   # create dir named jobid
@@ -385,11 +390,11 @@ def handle_register_job(reader, writer):
     jobGB, peakMbps = compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive)
 
   # generate weightmask 
-  wmask = yield from generate_weightmask(jobid, jobGB, peakMbps, latency_sensitive)
+  wmask, wmask_str = yield from generate_weightmask(jobid, jobGB, peakMbps, latency_sensitive)
  # wmask = [(ioctlcmd.calculate_datanode_hash("10.1.88.82", 50030), 1)]
 
   # register job in table
-  err = add_job(jobid, jobGB, peakMbps, wmask)
+  err = add_job(jobid, jobGB, peakMbps, wmask, wmask_str)
 
   # send wmask to metadata server   
   ioctlsock = yield from ioctlcmd.connect(NAMENODE_IP, NAMENODE_PORT)
@@ -402,6 +407,7 @@ def handle_register_job(reader, writer):
   resp = (RESP_LEN_BYTES + INT, TICKET, JOB_CMD, err, REGISTER_OPCODE, jobid_int)
   pkt = resp_packer.pack(*resp)
   writer.write(pkt)
+  print("-------------------------- REGISTERED JOB --------------------------------")
 
   return
   
@@ -414,6 +420,10 @@ def handle_deregister_job(reader, writer):
   jobid, = struct.Struct("!" + str(jobid_len) + "s").unpack(jobid)
   jobid = jobid.decode('utf-8')
   
+  print("------------------------- DEREGISTER JOB --------------------------------")
+  # clear weight of this job
+  for (datanodeip_port, weight) in job_table.loc[jobid,'wmask_str']:
+    datanode_alloc.at[datanodeip_port, 'net'] =  datanode_alloc.at[datanodeip_port, 'net'] - weight
   # delete job from table
   err = remove_job(jobid)
   if err == 0:
@@ -425,12 +435,14 @@ def handle_deregister_job(reader, writer):
       return
     pocket.delete(createdirsock, None, "/" + jobid)
     #pocket.close(createdirsock)
-  
+ 
+ 
   # reply to client with jobid int
   resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
   resp = (RESP_LEN_BYTES + INT, TICKET, JOB_CMD, err, DEREGISTER_OPCODE)
   pkt = resp_packer.pack(*resp)
   writer.write(pkt)
+  print("------------------------- DEREGISTERED JOB --------------------------------")
   return
 
 
@@ -439,7 +451,6 @@ def handle_jobs(reader, writer):
   address = writer.get_extra_info('peername')
   print('Accepted job connection from {}'.format(address))
   while True: # FIXME: dont' need while loop here, just return after one iter
-    print("Handle jobs...")
     hdr = yield from reader.read(MSG_LEN_HDR) 
     [msg_len, ticket, cmd, cmd_type, opcode] = hdr_req_packer.unpack(hdr)
     print(msg_len, ticket, cmd, cmd_type, opcode)
@@ -536,8 +547,8 @@ def autoscale_cluster(logfile):
     else:
       avg_util['net'] = avg_util['net_aggr'] / allocated_net * 100
     print(avg_util)
-    print(time.time(), avg_util['net_aggr'], avg_util['cpu'], avg_util['dram_usedGB'], allocated_net, avg_util['dram_totalGB'], file=logfile) 
-    
+    if num_nodes_active > 0:
+      print(time.time(), avg_util['net_aggr'], avg_util['cpu'], avg_util['dram_usedGB'], allocated_net, avg_util['dram_totalGB'], file=logfile) 
     # check datanode resource utilization and add/remove nodes as necessary
     # TODO: do the same for metadata server utilization and metadata node scaling
     
