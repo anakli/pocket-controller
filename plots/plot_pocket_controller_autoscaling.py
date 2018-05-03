@@ -30,8 +30,8 @@ def plot_usage(logfile):
 
   fig = plt.figure(figsize=(15,8))
   ax = plt.axes([0.06, 0.2, 0.9, 0.75]) # left bottom width height (fraction of total figsize)
-  ax.plot(x, net_alloc, label='Total GB/s allocated', linestyle=':', color="#1f77b4")
-  ax.plot(x, net_usage, label='Total GB/s used', color="#ff7f0e")
+  ax.plot(x, net_alloc, label='Total GB/s allocated', linestyle=':', color="#1f77b4", linewidth=3)
+  ax.plot(x, net_usage, label='Total GB/s used', color="#ff7f0e", linewidth=3)
   ax.set_xlabel("Time (s)")
   ax.set_ylabel("Throughput (GB/s)")
   ax.legend(loc='upper left')
