@@ -2,8 +2,10 @@ import pandas as pd
 import sys
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.text import OffsetFrom
 
 #time net_usedMbps avg_cpu dram_usedGB net_allocMbps dram_allocGB
+plt.rcParams.update({'font.size': 24})
 
 
 def plot_usage(logfile):
@@ -25,29 +27,50 @@ def plot_usage(logfile):
   dram_usedGB = data.loc[:,'dram_usedGB']
   dram_allocGB = data.loc[:, 'dram_allocGB']
 
-  fig = plt.figure()
-  ax = fig.add_subplot(111)
-  ax.plot(x, net_alloc, label='Total GB/s allocated', linestyle=':', color="#ff7f0e")
+
+  fig = plt.figure(figsize=(15,8))
+  ax = plt.axes([0.06, 0.2, 0.9, 0.75]) # left bottom width height (fraction of total figsize)
+  ax.plot(x, net_alloc, label='Total GB/s allocated', linestyle=':', color="#1f77b4")
   ax.plot(x, net_usage, label='Total GB/s used', color="#ff7f0e")
   ax.set_xlabel("Time (s)")
   ax.set_ylabel("Throughput (GB/s)")
   ax.legend(loc='upper left')
 
-  #ax.annotate('Job1 registers', xy=(REGISTER_JOB1, 2), xytext=(REGISTER_JOB1, 1.5),
-  #          arrowprops=dict(facecolor='black', shrink=0.05), horizontalalignment='left', verticalalignment='bottom'
-  #          )
-  #ax.annotate('Job1 deregisters', xy=(DEREGISTER_JOB1, 3), xytext=(DEREGISTER_JOB1, 3.5),
-  #          arrowprops=dict(facecolor='black', shrink=0.05), horizontalalignment='right', verticalalignment='top'
-  #          )
-  
-  ax1 = plt.figure().add_subplot(111)
-  ax1.plot(x, dram_allocGB, label='Total GB allocated', linestyle=':', color="#1f77b4")
-  ax1.plot(x, dram_usedGB, label='Total GB used', color="#1f77b4")
-  ax1.set_xlabel("Time (s)")
-  ax1.set_ylabel("Capacity (GB)")
-  ax1.legend(loc='upper left')
+  ax.annotate('Job1', xy=(REGISTER_JOB1, -0.07), xytext=(REGISTER_JOB1, -0.2),
+            xycoords=('data', 'axes fraction'), textcoords=('data', 'axes fraction'),
+            va='center',ha='center',color='blue',
+            arrowprops=dict(arrowstyle='->', color='blue'), size=18
+            )
+  ax.annotate('Job1', 
+            xy=(DEREGISTER_JOB1, -0.07), xytext=(DEREGISTER_JOB1, -0.2), 
+            xycoords=('data', 'axes fraction'), textcoords=('data', 'axes fraction'),
+            va='center',ha='center', color='blue',
+            arrowprops=dict(arrowstyle='<-', color='blue'), size=18
+            )
+  ax.annotate('Job2', xy=(REGISTER_JOB2, -0.07), xytext=(REGISTER_JOB2, -0.2),
+            xycoords=('data', 'axes fraction'), textcoords=('data', 'axes fraction'),
+            va='center',ha='center',color='green',
+            arrowprops=dict(arrowstyle='->', color='green'), size=18
+  )
+  ax.annotate('Job3', xy=(REGISTER_JOB3, -0.07), xytext=(REGISTER_JOB3, -0.2),
+            xycoords=('data', 'axes fraction'), textcoords=('data', 'axes fraction'),
+            va='center',ha='center',color='grey',
+            arrowprops=dict(arrowstyle='->',color='grey',), size=18
+  )
+  ax.annotate('Job3', xy=(DEREGISTER_JOB3, -0.07), xytext=(DEREGISTER_JOB3, -0.2),
+            xycoords=('data', 'axes fraction'), textcoords=('data', 'axes fraction'),
+            va='center',ha='center',color='green',
+            arrowprops=dict(arrowstyle='<-',color='green',), size=18
+  )
+  ax.annotate('Job2', xy=(DEREGISTER_JOB2, -0.07), xytext=(DEREGISTER_JOB2, -0.2),
+            xycoords=('data', 'axes fraction'), textcoords=('data', 'axes fraction'),
+            va='center',ha='center',color='grey',
+            arrowprops=dict(arrowstyle='<-',color='grey',), size=18
+  )
 
-  plt.show()
+
+  #plt.show()
+  plt.savefig("pocket_controller_autoscale.pdf")
 
 
 if __name__ == '__main__':
