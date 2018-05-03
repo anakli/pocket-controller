@@ -22,7 +22,7 @@ STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
 GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
 AUTOSCALE_INTERVAL = 1           # in seconds
 
-WAIT_FOR_DRAM_STARTUP = 20       # in seconds
+WAIT_FOR_DRAM_STARTUP = 10       # in seconds
 WAIT_FOR_FLASH_STARTUP = 60 #50      # in seconds
 FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash
                                  # if need more nodes for capacity than for throughput
@@ -82,12 +82,14 @@ dn_req_packer = struct.Struct("!iqhiiiii")
 
 dram_launch_num = 0
 flash_launch_num = 0
+waitnodes = 0
 
 job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask', 'wmask_str']).set_index('jobid')
 datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net','blacklisted']).set_index(['datanodeip_port'])
 datanode_usage.loc[:, ('cpu', 'net','blacklisted')] = datanode_usage.loc[:, ('cpu', 'net','blacklisted')].astype(int) 
-datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
+datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net', 'DRAM_GB', 'Flash_GB', 'blacklisted', 'reserved']).set_index(['datanodeip_port'])
 datanode_alloc.loc[:,('cpu', 'net', 'DRAM_GB', 'Flash_GB')] = datanode_alloc.loc[:,('cpu', 'net', 'DRAM_GB', 'Flash_GB')].astype(float) 
+#datanode_alloc.loc[:,'blacklisted'] = datanode_alloc.loc[:,'blacklisted'].astype(int) 
 datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
 avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0, 'net_aggr':0, 'dram_totalGB': 0, 'dram_usedGB':0}
 
@@ -109,15 +111,20 @@ def add_datanode_alloc(datanodeip, port):
   datanode = datanodeip + ":" + str(port)
   if datanode in datanode_alloc.index.values: 
     return 1
-  datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0)
+  global waitnodes
+  if waitnodes > 0:
+    datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0, reserved=1)
+    waitnodes = waitnodes -1
+  else:
+    print("index values:", datanode_usage.index.values)
+    #print(datanode_usage)
+    datanode_alloc.loc[datanode,:] = dict(cpu=0.0, net=0.0, DRAM_GB=0.0, Flash_GB=0.0, blacklisted=0, reserved=0)
 
 def add_datanode_usage(datanodeip, port, cpu, net):
   datanode = datanodeip + ":" + str(port)
   if datanode not in datanode_usage.index.values:
     print("datanode usage table got new datanode {}.".format(datanode))
-    print("index values:", datanode_usage.index.values)
-    print(datanode_usage)
-    datanode_usage.loc[datanode,:] = dict(cpu=cpu, nets=net, blacklisted=0)
+    datanode_usage.loc[datanode,:] = dict(cpu=cpu, net=net, blacklisted=0) #FIXME: put waitnodes logic here when util based scaling
   else:
     datanode_usage.at[datanode ,'cpu'] = cpu 
     datanode_usage.at[datanode, 'net'] = net
@@ -225,8 +232,8 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   if throughput_bound:
     # find all nodes that have spare Mbps 
     #print(datanode_alloc)
-    spare_throughput = datanode_alloc['net'] < 1.0
-    candidate_nodes_net = datanode_alloc[spare_throughput].sort_values(by='net', ascending=False).loc[:, 'net']
+    spare_throughput = datanode_alloc.loc[(datanode_alloc['net'] < 1.0) & (datanode_alloc['blacklisted'] == 0)]
+    candidate_nodes_net = spare_throughput.sort_values(by='net', ascending=False).loc[:, 'net']
     spare_net_weight_alloc = 0
     job_net_weight_req = jobMbps * 1.0 / NODE_Mbps
     #print(candidate_nodes_net)
@@ -258,18 +265,20 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
         break
     
     if spare_net_weight_alloc == job_net_weight_req:
-      print("Satisified job without needing to launch new nodes :)")
+      print("Satisfied job without needing to launch new nodes :)")
       #print(datanode_alloc)
     else:
       datanode_alloc_prelaunch = datanode_alloc.copy()
       extra_nodes_needed = (job_net_weight_req - spare_net_weight_alloc)
       last_weight = extra_nodes_needed - int(extra_nodes_needed)
       if last_weight == 0:
-        new_node_weights = [1 for i in range(0, int(extra_nodes_needed))]
+        new_node_weights = [1.0 for i in range(0, int(extra_nodes_needed))]
       else:
-        new_node_weights = [1 for i in range(0, int(extra_nodes_needed))]
+        new_node_weights = [1.0 for i in range(0, int(extra_nodes_needed))]
         new_node_weights.append(last_weight)
       parallelism = math.ceil(extra_nodes_needed)
+      global waitnodes
+      waitnodes = parallelism
       print("KUBERNETES: launch {} extra nodes, wait for them to come up and assing proper weights {}"\
               .format(parallelism, new_node_weights))
       # decide which kind of nodes to launch
@@ -311,8 +320,11 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     datanode_port = int(datanodeip_port.split(":")[1])
     datanode_hash = ioctlcmd.calculate_datanode_hash(datanode_ip, datanode_port) 
     job_wmask.append((datanode_hash, float("{0:.2f}".format(weight))))
+    datanode_alloc.at[datanodeip_port,'net'] = weight
+    datanode_alloc.at[datanodeip_port,'reserved'] = 0
 
   print("job_wmask is:", wmask) 
+  print(datanode_alloc)
   return job_wmask, wmask
 
 def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
@@ -362,7 +374,7 @@ def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
 
 @asyncio.coroutine
 def handle_register_job(reader, writer):
-  print("-------------------------- REGISTER JOB --------------------------------")
+  print("-------------------------- REGISTER JOB --------------------------------", time.time())
   jobname_len = yield from reader.read(INT)
   jobname_len, = struct.Struct("!i").unpack(jobname_len)
   jobname = yield from reader.read(jobname_len + 3*INT + SHORT)
@@ -420,7 +432,7 @@ def handle_deregister_job(reader, writer):
   jobid, = struct.Struct("!" + str(jobid_len) + "s").unpack(jobid)
   jobid = jobid.decode('utf-8')
   
-  print("------------------------- DEREGISTER JOB --------------------------------")
+  print("------------------------- DEREGISTER JOB --------------------------------", time.time())
   # clear weight of this job
   for (datanodeip_port, weight) in job_table.loc[jobid,'wmask_str']:
     datanode_alloc.at[datanodeip_port, 'net'] =  datanode_alloc.at[datanodeip_port, 'net'] - weight
@@ -493,7 +505,7 @@ def handle_datanodes(reader, writer):
     # TODO: should probably add timestamp field 
     #       to know when a blacklisted node dies (it stops sending updates)
     #print("Datanode usage: ", datanode_ip, " cpu: ", cpu_util, " net: ", rx_util, tx_util )
-    print("Datanode usage: ", datanode_ip, " avg_cpu: ", avg_cpu, " peak net: ", peak_net )
+    #print("Datanode usage: ", datanode_ip, " avg_cpu: ", avg_cpu, " peak net: ", peak_net )
 
 @asyncio.coroutine
 def get_capacity_stats_periodically(sock):
@@ -526,8 +538,11 @@ UTIL_CPU_LOWER_LIMIT = 50 #70
 UTIL_CPU_UPPER_LIMIT = 80 
 UTIL_NET_LOWER_LIMIT = 50 #70
 UTIL_NET_UPPER_LIMIT = 80
-MIN_NUM_DATANODES = 1
-MAX_NUM_DATANODES = 1
+MIN_NUM_DATANODES = 2
+MAX_NUM_DATANODES = 8
+
+ALLOC_NET_UPPER_LIMIT = 1.0
+ALLOC_NET_LOWER_LIMIT = 0.5
 @asyncio.coroutine
 def autoscale_cluster(logfile):
   while True:
@@ -535,20 +550,23 @@ def autoscale_cluster(logfile):
     yield from asyncio.sleep(AUTOSCALE_INTERVAL)
     #print("autoscale cluster wakeup from sleep")
     # compute average
-    print(datanode_usage)
-    avg_util['cpu'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'cpu'].mean()  
-    avg_util['net_aggr'] = datanode_usage.loc[datanode_usage['blacklisted'] == 0].loc[:,'net'].sum() * NODE_Mbps / 100
+    #print(datanode_usage)
+    avg_util['cpu'] = datanode_usage.loc[:,'cpu'].mean()  
+    avg_util['net_aggr'] = datanode_usage.loc[:,'net'].sum() * NODE_Mbps / 100
     num_nodes_active = 0
     if len(datanode_usage.index) > 0:
-      num_nodes_active = int(datanode_usage.loc[datanode_usage['blacklisted'] == 0].count()[0])
+      #num_nodes_active = int(datanode_usage.loc[datanode_usage['blacklisted'] == 0].count()[0]) 
+      num_nodes_active = int(datanode_alloc.loc[datanode_alloc['blacklisted'] == 0].count()[0]) 
     allocated_net = num_nodes_active * NODE_Mbps
     if num_nodes_active == 0:
       avg_util['net'] = 0
     else:
       avg_util['net'] = avg_util['net_aggr'] / allocated_net * 100
-    print(avg_util)
+    #print(avg_util)
+    print(datanode_alloc)
     if num_nodes_active > 0:
       print(time.time(), avg_util['net_aggr'], avg_util['cpu'], avg_util['dram_usedGB'], allocated_net, avg_util['dram_totalGB'], file=logfile) 
+
     # check datanode resource utilization and add/remove nodes as necessary
     # TODO: do the same for metadata server utilization and metadata node scaling
     
@@ -558,6 +576,26 @@ def autoscale_cluster(logfile):
       #yield from launch_flash_datanode(MIN_NUM_DATANODES-num_nodes_active)
       yield from launch_dram_datanode(MIN_NUM_DATANODES-num_nodes_active)
       print("Launched datanode. Should now have min size cluster.")
+    datanode_net_alloc = datanode_alloc[datanode_alloc['reserved'] == 0].loc[:,'net'].mean()
+    if datanode_net_alloc > ALLOC_NET_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
+      print("add a dram datanode. net alloc is {}".format(datanode_net_alloc))
+      yield from launch_dram_datanode(1)
+    if datanode_net_alloc < ALLOC_NET_LOWER_LIMIT and num_nodes_active > MIN_NUM_DATANODES:
+      print("REMOVE NODE, avg datanode_net_alloc is low:", datanode_net_alloc)
+      num_eligible_datanodes = int(datanode_alloc.loc[(datanode_alloc['blacklisted'] == 0) & (datanode_alloc['reserved'] == 0)].count()[0])
+      print("eligible_datanodes: ", num_eligible_datanodes)
+      if num_eligible_datanodes == 0:
+        continue
+      eligible_datanodes = datanode_alloc.loc[(datanode_alloc['blacklisted'] == 0) & (datanode_alloc['reserved'] == 0)]
+      print("eligible_datanodes: ", eligible_datanodes)
+      datanodeip_port = eligible_datanodes['net'].idxmin()
+      print("Datanode with lowest net alloc is: ", datanodeip_port)
+      datanode_alloc.at[datanodeip_port, 'blacklisted'] = 1
+      datanode_usage.at[datanodeip_port, 'blacklisted'] = 1
+      datanode_provisioned.at[datanodeip_port, 'blacklisted'] = 1
+    continue  
+
+
     if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
       # add a DRAM datanode
       print("add a dram datanode. dram util is {}".format(avg_util['dram']))
