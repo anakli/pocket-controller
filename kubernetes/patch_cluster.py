@@ -29,22 +29,15 @@ def prep_i3instances(private_subnetid, node_groupid):
     i3_instance_ids = p.findall(out) 
     print "i3 instance ids findall: ", i3_instance_ids 
     
-    i = 0
     for i3_instance_id in i3_instance_ids:
         # create elastic network interface 
         create_eni_command = "aws ec2 create-network-interface --subnet-id " + private_subnetid + " --description \"eni for i3\" --groups " \
                                + node_groupid  
         print create_eni_command
-        sp.call(create_eni_command, shell=True)
-        
-        # get i3 eni id
-        cmd = "aws ec2 describe-network-interfaces --filter Name=description,Values='*eni for i3*' --query \"NetworkInterfaces[*].NetworkInterfaceId\""
-        exitcode, out, err = get_exitcode_stdout_stderr(cmd)
-        pattern = r'"([A-Za-z0-9_\./\\-]*)"'
-        #i3_eni = re.search(pattern, out).group().strip('\"')
-        i3_enis = p.findall(out)
-        i3_eni = i3_enis[i]
-        i = i + 1 #FIXME: are they always listed in order created?
+        exitcode, out, err = get_exitcode_stdout_stderr(create_eni_command)
+        print out
+        pattern = r'"(eni-[A-Za-z0-9]+)"'
+        i3_eni = re.search(pattern, out).group().strip('\"')
         print "i3 ENI id is: " + i3_eni
     
         # attach eni to i3 instance
