@@ -38,10 +38,10 @@ def plot_usage(noGC, withGC):
   fig, ax = plt.subplots(figsize=(15, 8))
   
   x= x_GC
-  ax.plot(x_NoGC, dram_used_NoGC, label='No GC hints', color="#1f77b4", linewidth=3)
-  ax.plot(x_GC, dram_used_GC, label='With GC hints', color="#1f77b4", linewidth=3, linestyle=':')
+  ax.plot(x_NoGC, dram_used_NoGC, label='No data liftime hints', color="#1f77b4", linewidth=4)
+  ax.plot(x_GC, dram_used_GC, label='With data lifetime hints', color="#2ca02c", linewidth=4, linestyle='--')
   ax.set_xlim(0,180)
-  ax.set_ylim(0,20)
+  ax.set_ylim(0,25)
   ax.set_xlabel("Time (s)")
   ax.set_ylabel("Capacity used (GB)")
   ax.legend(loc='upper left')
