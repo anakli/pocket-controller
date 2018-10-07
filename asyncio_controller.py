@@ -14,26 +14,47 @@ import yaml
 from kubernetes import client, config
 import time
 
-#NAMENODE_IP = "10.1.88.82"
-NAMENODE_IP = "10.1.0.10"
+NAMENODE_IP = "10.1.0.10"	 # set this to the metadata server IP
 NAMENODE_PORT = 9070
 
-STORAGE_TIERS = [0, 1]           # 0 is DRAM, 1 is Flash
-GET_CAPACITY_STATS_INTERVAL = 1  # in seconds
-AUTOSCALE_INTERVAL = 1           # in seconds
+DRAM = 0
+NVME = 1
+STORAGE_TIERS = [DRAM, NVME]     # define tiers in order of lowest to highest latency       
 
-WAIT_FOR_DRAM_STARTUP = 10       # in seconds
-WAIT_FOR_FLASH_STARTUP = 60 #50      # in seconds
-FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash
-                                 # if need more nodes for capacity than for throughput
+WAIT_FOR_DRAM_STARTUP = 10       # how long it takes for DRAM container to startup, in seconds
+WAIT_FOR_FLASH_STARTUP = 60      # how long it takes ReFlex container to startup, in seconds
+FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash,
+                                 # used if need more nodes for capacity than for throughput
 
-BLOCKSIZE = 65536
+# TODO: tune these parameters empirically!
+UTIL_DRAM_LOWER_LIMIT = 60
+UTIL_DRAM_UPPER_LIMIT = 80
+UTIL_FLASH_LOWER_LIMIT = 60
+UTIL_FLASH_UPPER_LIMIT = 80
+UTIL_CPU_LOWER_LIMIT = 60
+UTIL_CPU_UPPER_LIMIT = 80 
+UTIL_NET_LOWER_LIMIT = 60
+UTIL_NET_UPPER_LIMIT = 80
+ALLOC_NET_UPPER_LIMIT = 1.0      # autoscaling for network is currently based on allocated network bandwidth 
+ALLOC_NET_LOWER_LIMIT = 0.5
 
-DRAM_NODE_GB = 60
+MIN_NUM_DATANODES = 2		
+MAX_NUM_DATANODES = 8
+
+
+BLOCKSIZE = 65536		 # this should match setting in Pocket metadata and storage servers
+MAX_DIR_DEPTH = 16
+TICKET = 1000
+
+DRAM_NODE_GB = 60		 # instance properties
 FLASH_NODE_GB = 2000
 NODE_Mbps = 8000
-DEFAULT_NUM_NODES = 50
-PER_LAMBDA_MAX_Mbps = 600  
+
+DEFAULT_NUM_NODES = 50		 # default number of nodes to use when no hint given for job 
+PER_LAMBDA_MAX_Mbps = 600	 # AWS Lambda approximate per-lambda network limit in Mb/s
+
+GET_CAPACITY_STATS_INTERVAL = 1  # how often get stats from metadata server, in seconds
+AUTOSCALE_INTERVAL = 1           # how often try to adjust cluster size, in seconds
 
 # define RPC_CMDs and CMD_TYPEs
 RPC_IOCTL_CMD = 13
@@ -46,17 +67,13 @@ CMD_DEL = 2
 CMD_CREATE_DIR = 3
 CMD_CLOSE = 4
 
-
 # define IOCTL OPCODES
-NOP = 1
+REGISTER_OPCODE = 0
+DEREGISTER_OPCODE = 1
 DN_REMOVE_OPCODE = 2
 GET_CLASS_STATS_OPCODE = 3
 NN_SET_WMASK_OPCODE = 4
-REGISTER_OPCODE = 0
-DEREGISTER_OPCODE = 1
 
-MAX_DIR_DEPTH = 16
-TICKET = 1000
 
 INT = 4
 LONG = 8
@@ -84,13 +101,39 @@ dram_launch_num = 0
 flash_launch_num = 0
 waitnodes = 0
 
-job_table = pd.DataFrame(columns=['jobid', 'GB', 'Mbps', 'wmask', 'wmask_str']).set_index('jobid')
-datanode_usage = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net','blacklisted']).set_index(['datanodeip_port'])
+# store job ids and their associated capacity & throughput allocation and weight map
+job_table = pd.DataFrame(columns=['jobid', 
+				  'GB', 
+				  'Mbps', 
+				  'wmask', 
+				  'wmask_str']).set_index('jobid')
+
+# keep track of each storage server's CPU and network utilization
+datanode_usage = pd.DataFrame(columns=['datanodeip_port',
+				       'cpu', 
+				       'net',
+				       'blacklisted']).set_index(['datanodeip_port'])
 datanode_usage.loc[:, ('cpu', 'net','blacklisted')] = datanode_usage.loc[:, ('cpu', 'net','blacklisted')].astype(int) 
-datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 'cpu', 'net', 'DRAM_GB', 'Flash_GB', 'blacklisted', 'reserved']).set_index(['datanodeip_port'])
+
+# keep track of each storage server node's allocated resources for running the Pocket storage container
+datanode_alloc = pd.DataFrame(columns=['datanodeip_port', 
+				       'cpu', 
+				       'net', 
+				       'DRAM_GB', 
+				       'Flash_GB',
+				       'blacklisted', 
+				       'reserved']).set_index(['datanodeip_port'])
 datanode_alloc.loc[:,('cpu', 'net', 'DRAM_GB', 'Flash_GB')] = datanode_alloc.loc[:,('cpu', 'net', 'DRAM_GB', 'Flash_GB')].astype(float) 
-#datanode_alloc.loc[:,'blacklisted'] = datanode_alloc.loc[:,'blacklisted'].astype(int) 
-datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 'cpu_num', 'net_Mbps', 'DRAM_GB', 'Flash_GB', 'blacklisted']).set_index(['datanodeip_port'])
+
+# keep track of each storage server node's provisioned resources on the VM 
+datanode_provisioned = pd.DataFrame(columns=['datanodeip_port', 
+					     'cpu_num', 
+					     'net_Mbps', 
+					     'DRAM_GB', 
+					     'Flash_GB', 
+					     'blacklisted']).set_index(['datanodeip_port'])
+
+# total cluster utilization across multiple resource dimensions
 avg_util = {'cpu': 0, 'net': 0, 'dram': 0, 'flash': 0, 'net_aggr':0, 'dram_totalGB': 0, 'dram_usedGB':0}
 
 
@@ -441,7 +484,6 @@ def handle_deregister_job(reader, writer):
   if err == 0:
     # delete dir named jobid
     # NOTE: this is blocking but we are not yielding
-    # FIXME: fix bug in c++ client for deleting files and dirs!
     createdirsock = pocket.connect(NAMENODE_IP, NAMENODE_PORT)
     if createdirsock is None:
       return
@@ -494,15 +536,15 @@ def handle_datanodes(reader, writer):
     if len(cpu_util) == 0:
       avg_cpu = 0
     else:
-      #avg_cpu = math.ceil(sum(cpu_util)/len(cpu_util)) # FIXME: how do we want to handle mulitple cores??
-      avg_cpu = math.ceil(cpu_util[0])  # FIXME: how do we want to handle mulitple cores??
+      #avg_cpu = math.ceil(sum(cpu_util)/len(cpu_util)) # FIXME: calculate CPU utilization with multiple cores
+      avg_cpu = math.ceil(cpu_util[0])  
     peak_net = int(max(rx_util, tx_util)*1.0/NODE_Mbps * 100)
     # add datanode to tables
     datanode_ip = socket.inet_ntoa(struct.pack('!L', datanode_int))
     add_datanode_provisioned(datanode_ip, port, len(cpu_util))
     add_datanode_alloc(datanode_ip, port) 
     add_datanode_usage(datanode_ip, port, avg_cpu, peak_net) 
-    # TODO: should probably add timestamp field 
+    # TODO: should add timestamp field 
     #       to know when a blacklisted node dies (it stops sending updates)
     #print("Datanode usage: ", datanode_ip, " cpu: ", cpu_util, " net: ", rx_util, tx_util )
     #print("Datanode usage: ", datanode_ip, " avg_cpu: ", avg_cpu, " peak net: ", peak_net )
@@ -510,7 +552,6 @@ def handle_datanodes(reader, writer):
 @asyncio.coroutine
 def get_capacity_stats_periodically(sock):
   while True:
-    #print("Get capacity stats...")
     yield from asyncio.sleep(GET_CAPACITY_STATS_INTERVAL)
     for tier in STORAGE_TIERS: 
       all_blocks, free_blocks = yield from ioctlcmd.get_class_stats(sock, tier)
@@ -529,20 +570,6 @@ def get_capacity_stats_periodically(sock):
         avg_util['flash'] = avg_usage 
 
 
-# FIXME: tune these parameters empirically!
-UTIL_DRAM_LOWER_LIMIT = 50 #70
-UTIL_DRAM_UPPER_LIMIT = 80
-UTIL_FLASH_LOWER_LIMIT = 50 #70
-UTIL_FLASH_UPPER_LIMIT = 80
-UTIL_CPU_LOWER_LIMIT = 50 #70
-UTIL_CPU_UPPER_LIMIT = 80 
-UTIL_NET_LOWER_LIMIT = 50 #70
-UTIL_NET_UPPER_LIMIT = 80
-MIN_NUM_DATANODES = 2
-MAX_NUM_DATANODES = 8
-
-ALLOC_NET_UPPER_LIMIT = 1.0
-ALLOC_NET_LOWER_LIMIT = 0.5
 @asyncio.coroutine
 def autoscale_cluster(logfile):
   while True:
@@ -595,7 +622,7 @@ def autoscale_cluster(logfile):
       datanode_provisioned.at[datanodeip_port, 'blacklisted'] = 1
     continue  
 
-
+'''
     if avg_util['dram'] > UTIL_DRAM_UPPER_LIMIT and num_nodes_active < MAX_NUM_DATANODES:
       # add a DRAM datanode
       print("add a dram datanode. dram util is {}".format(avg_util['dram']))
@@ -642,7 +669,7 @@ def autoscale_cluster(logfile):
       datanode_alloc.at[datanodeip_port, 'blacklisted'] = 1
       datanode_usage.at[datanodeip_port, 'blacklisted'] = 1
       datanode_provisioned.at[datanodeip_port, 'blacklisted'] = 1
-
+'''
       
     
 
