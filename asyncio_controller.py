@@ -14,6 +14,8 @@ import yaml
 from kubernetes import client, config
 import time
 
+CONTROLLER_IP = "10.1.47.178"    # note: the controller IP address is hard-coded in other places
+                                 # so when create controller VM in EC2, set its IP to 10.1.47.178
 NAMENODE_IP = "10.1.0.10"	 # set this to the metadata server IP
 NAMENODE_PORT = 9070
 
@@ -24,9 +26,9 @@ DRAM = 0
 NVME = 1
 STORAGE_TIERS = [DRAM, NVME]     # define tiers in order of lowest to highest latency       
 
-WAIT_FOR_DRAM_STARTUP = 10 #10       # how long it takes for DRAM container to startup, in seconds
+WAIT_FOR_DRAM_STARTUP = 40       # how long it takes for DRAM container to startup, in seconds
 WAIT_FOR_FLASH_STARTUP = 40      # how long it takes ReFlex container to startup, in seconds
-FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash,
+#FRAC_DRAM_ALLOCATION = 0.2       # fraction of dataset that will go to dram vs. flash,
                                  # used if need more nodes for capacity than for throughput
 
 # TODO: tune these parameters empirically!
@@ -39,7 +41,7 @@ UTIL_CPU_UPPER_LIMIT = 80
 UTIL_NET_LOWER_LIMIT = 60
 UTIL_NET_UPPER_LIMIT = 80
 ALLOC_NET_UPPER_LIMIT = 1.0      # autoscaling for network is currently based on allocated network bandwidth 
-ALLOC_NET_LOWER_LIMIT = 0.0 #0.5 -- for now
+ALLOC_NET_LOWER_LIMIT = 0.5 
 
 MIN_NUM_DATANODES = 1            # this must be *at least 1*, otherwise can't create dir to register job		
 MAX_NUM_DATANODES = 8
@@ -53,11 +55,12 @@ DRAM_NODE_GB = 60		 # instance properties
 FLASH_NODE_GB = 111 #2000	 # currently NVMe node registers 111669149696 size namespace (set in crail-conf.site)
 NODE_Mbps = 8000
 
-DEFAULT_NUM_NODES = 50		 # default number of nodes to use when no hint given for job 
+DEFAULT_NUM_NODES = 2		 # default number of nodes to use when no hint given for job 
 PER_LAMBDA_MAX_Mbps = 600	 # AWS Lambda approximate per-lambda network limit in Mb/s
 
 GET_CAPACITY_STATS_INTERVAL = 1  # how often get stats from metadata server, in seconds
-AUTOSCALE_INTERVAL = 5 #1           # how often try to adjust cluster size, in seconds
+AUTOSCALE_INTERVAL = 1           # how often try to adjust cluster size, in seconds
+# TODO: add averaging of utilization statistics over AUTOSCALE_INTERVAL
 
 # define RPC_CMDs and CMD_TYPEs
 RPC_IOCTL_CMD = 13
@@ -280,7 +283,6 @@ def incr_datanode_alloc_capacity(node, capacity, latency_sensitive):
 @asyncio.coroutine
 def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   print("generate weightmask for ", jobid, jobGB, jobMbps, latency_sensitive)
-  print(datanode_alloc)
   wmask = []
   # Step 1: determine if capacity or throughput bound
   if latency_sensitive:  
@@ -321,15 +323,14 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   spare_throughput = datanode_alloc.loc[(datanode_alloc['net'] < 1.0) & (datanode_alloc['blacklisted'] == 0)]
   candidate_nodes_net = spare_throughput.sort_values(by='net', ascending=False).loc[:, 'net']
 
-  print("Candidate nodes net: ", candidate_nodes_net)
-  print("Candidate nodes capacity: ", candidate_nodes_capacity)
+  #print("Candidate nodes net: ", candidate_nodes_net)
+  #print("Candidate nodes capacity: ", candidate_nodes_capacity)
 
   # If throughput bound, will allocate nodes based on CPU and network demand 
   if throughput_bound:
     job_net_weight_allocated = 0  # as a fraction of NODE_Mbps
     job_net_weight_req = jobMbps * 1.0 / NODE_Mbps
 
-    print("job net weight req {}, this is {} Mbps".format(job_net_weight_req, jobMbps))
     # smallest fit first algorithm: fill in smallest gap first
     # note: first set job weightmask such that each weight represents
     #       the fraction of that node's throughput that is allocated to this job
@@ -347,36 +348,30 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       if job_net_weight_req - job_net_weight_allocated >= 1 - net: 
         node_net_alloc = 1 - net
         corresponding_capacity_alloc = node_net_alloc * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
-        print("throughput-bound if 1")
         # check if enough capacity on this node (assume uniform data access, so all data is equally hot)
         capacity_avail = 1 - capacity
         if capacity_avail < corresponding_capacity_alloc:
-          print("throughput-bound if 1.1 -- lack capacity")
           corresponding_net_alloc = capacity_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           job_net_weight_allocated += corresponding_net_alloc
           wmask.append((node, corresponding_net_alloc)) 
           datanode_alloc.at[node,'net'] += corresponding_net_alloc 
           incr_datanode_alloc_capacity(node, capacity_avail, latency_sensitive)
         else:
-          print("throughput-bound if 1.1 else")
           job_net_weight_allocated += node_net_alloc
           wmask.append((node, 1.0)) 
           datanode_alloc.at[node,'net'] = 1.0
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive)
       elif job_net_weight_req - job_net_weight_allocated < 1 - net:
-        print("throughput-bound elif 2")
         node_net_alloc = (job_net_weight_req - job_net_weight_allocated)
         corresponding_capacity_alloc = node_net_alloc * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
         capacity_avail = 1 - capacity
         if capacity_avail < corresponding_capacity_alloc:
-          print("throughput-bound elif 2.1")
           corresponding_net_alloc = capacity_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           job_net_weight_allocated += corresponding_net_alloc
           wmask.append((node, corresponding_net_alloc)) 
           datanode_alloc.at[node,'net'] += corresponding_net_alloc
           incr_datanode_alloc_capacity(node, capacity_avail, latency_sensitive)
         else:
-          print("throughput-bound elif 2.2")
           job_net_weight_allocated += node_net_alloc 
           wmask.append((node, node_net_alloc))
           datanode_alloc.at[node,'net'] += node_net_alloc
@@ -406,14 +401,14 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       print("KUBERNETES: launch {} extra nodes, wait for them to come up and assing proper weights {}"\
               .format(parallelism, new_node_weights))
       # decide which kind of nodes to launch
-      if latency_sensitive and jobGB <= parallelism*DRAM_NODE_GB:
+      if latency_sensitive: #and jobGB <= parallelism*DRAM_NODE_GB:
         yield from launch_dram_datanode(parallelism)
-      elif latency_sensitive: # but capacity doesn't fit in paralellism*DRAM nodes
-        print("app is latency sensitive but high capacity, so we put {} in DRAM, rest in flash".format(FRAC_DRAM_ALLOCATION))
-        num_dram_nodes = int((jobGB * FRAC_DRAM_ALLOCATION)/ DRAM_NODE_GB)
-        num_flash_nodes = parallelism - num_dram_nodes
-        yield from launch_dram_datanode(num_dram_nodes)
-        yield from launch_flash_datanode(num_flash_nodes)
+      #elif latency_sensitive: # but capacity doesn't fit in paralellism*DRAM nodes
+      #  print("app is latency sensitive but high capacity, so we put {} in DRAM, rest in flash".format(FRAC_DRAM_ALLOCATION))
+      #  num_dram_nodes = int((jobGB * FRAC_DRAM_ALLOCATION)/ DRAM_NODE_GB)
+      #  num_flash_nodes = parallelism - num_dram_nodes
+      #  yield from launch_dram_datanode(num_dram_nodes)
+      #  yield from launch_flash_datanode(num_flash_nodes)
       else:
         yield from launch_flash_datanode(parallelism)
       
@@ -444,36 +439,30 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
       if jobGB_weight_req - jobGB_weight_allocated >= 1 - capacity: 
         nodeGB_alloc = 1 - capacity
         corresponding_net_alloc = nodeGB_alloc * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
-        print("capacity-bound if 1")
         # check if enough throughput on this node (assume uniform data access, so all data is equally hot)
         net_avail = 1 - net
         if net_avail < corresponding_net_alloc:
-          print("capacity-bound if 1.1")
           corresponding_capacity_alloc = net_avail * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
           jobGB_weight_allocated += corresponding_capacity_alloc
           wmask.append((node, corresponding_capacity_alloc)) 
           datanode_alloc.at[node,'net'] += net_avail
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive) 
         else:
-          print("capacity-bound if 1.2")
           jobGB_weight_allocated += nodeGB_alloc
           wmask.append((node, nodeGB_alloc)) 
           datanode_alloc.at[node,'net'] += net_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           incr_datanode_alloc_capacity(node, nodeGB_alloc, latency_sensitive)
       elif jobGB_weight_req - jobGB_weight_allocated < 1 - capacity:
-        print("capacity-bound if 2")
         nodeGB_alloc = (jobGB_weight_req - jobGB_weight_allocated)
         corresponding_net_alloc = nodeGB_alloc * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
         net_avail = 1 - net
         if net_avail < corresponding_net_alloc:
-          print("capacity-bound if 2.1")
           corresponding_capacity_alloc = net_avail * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
           jobGB_weight_allocated += corresponding_capacity_alloc
           wmask.append((node, corresponding_capacity_alloc)) 
           datanode_alloc.at[node,'net'] += net_avail 
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive)
         else:
-          print("capacity-bound if 2.2")
           jobGB_weight_allocated += nodeGB_alloc 
           wmask.append((node, nodeGB_alloc))
           datanode_alloc.at[node,'net'] += corresponding_net_alloc
@@ -526,9 +515,7 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   # first save the datanode allocation weights to make it easier to deregister job later
   if throughput_bound:
     job_datanode_net_allocations[jobid] = wmask.copy() 
-    print("job_datanode_net wmask:", job_datanode_net_allocations[jobid])
     corresponding_capacity_alloc_wmask = [ (x[0], float(x[1] * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY))) for x in wmask]
-    print("corresponding_capacity_alloc wmask:", corresponding_capacity_alloc_wmask)
     if latency_sensitive:
       job_datanode_dramGB_allocations[jobid] = corresponding_capacity_alloc_wmask 
     else:
@@ -536,7 +523,6 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
 
   else:
     corresponding_net_alloc_wmask = [ (x[0], float(x[1] * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps))) for x in wmask]
-    print("corresponding_capacity_alloc wmask:", corresponding_net_alloc_wmask)
     job_datanode_net_allocations[jobid] = corresponding_net_alloc_wmask 
     if latency_sensitive:
       job_datanode_dramGB_allocations[jobid] = wmask.copy() 
@@ -570,7 +556,7 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     job_wmask.append((datanode_hash, float("{0:.2f}".format(jobweight)))) 
 
   print("job_wmask is:", wmask) 
-  print(datanode_alloc)
+  #print(datanode_alloc)
   return job_wmask, wmask
 
 def compute_GB_Mbps_with_hints(num_lambdas, jobGB, peakMbps, latency_sensitive):
@@ -834,9 +820,11 @@ def autoscale_cluster(logfile):
       print("add a dram datanode. net alloc is {}".format(datanode_net_alloc))
       yield from launch_dram_datanode(1)
     if datanode_net_alloc < ALLOC_NET_LOWER_LIMIT and num_nodes_active > MIN_NUM_DATANODES:
-      print("REMOVE NODE, avg datanode_net_alloc is low:", datanode_net_alloc)
+      print("Try to REMOVE NODE because avg datanode_net_alloc is low:", datanode_net_alloc)
+      # note: reserved nodes cannot be removed
+      # nodes are in reserved status when they are joining cluster but controller not done waiting for them to have joined
       num_eligible_datanodes = int(datanode_alloc.loc[(datanode_alloc['blacklisted'] == 0) & (datanode_alloc['reserved'] == 0)].count()[0])
-      print("eligible_datanodes: ", num_eligible_datanodes)
+      print("eligible_datanodes to remove: ", num_eligible_datanodes)
       if num_eligible_datanodes == 0:
         continue
       eligible_datanodes = datanode_alloc.loc[(datanode_alloc['blacklisted'] == 0) & (datanode_alloc['reserved'] == 0)]
@@ -904,8 +892,7 @@ if __name__ == '__main__':
   
   loop = asyncio.get_event_loop()
   # Start server listening for register/deregister job connections
-  #address = ("localhost", 4321) 
-  address = ("10.1.47.178", 4321) 
+  address = (CONTROLLER_IP, 4321) 
   coro = asyncio.start_server(handle_jobs, *address)
   server = loop.run_until_complete(coro)
   print('Listening at {}'.format(address))
@@ -920,7 +907,7 @@ if __name__ == '__main__':
   asyncio.async(autoscale_cluster(logfile))
  
   # Start server listening for datanode util info
-  address = ("10.1.47.178", 2345) 
+  address = (CONTROLLER_IP, 2345) 
   coro = asyncio.start_server(handle_datanodes, *address)
   server = loop.run_until_complete(coro)
   print('Listening at {}'.format(address))
