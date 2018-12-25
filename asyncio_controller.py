@@ -39,7 +39,7 @@ UTIL_CPU_UPPER_LIMIT = 80
 UTIL_NET_LOWER_LIMIT = 60
 UTIL_NET_UPPER_LIMIT = 80
 ALLOC_NET_UPPER_LIMIT = 1.0      # autoscaling for network is currently based on allocated network bandwidth 
-ALLOC_NET_LOWER_LIMIT = 0.5
+ALLOC_NET_LOWER_LIMIT = 0.0 #0.5 -- for now
 
 MIN_NUM_DATANODES = 1            # this must be *at least 1*, otherwise can't create dir to register job		
 MAX_NUM_DATANODES = 8
@@ -315,6 +315,9 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   spare_throughput = datanode_alloc.loc[(datanode_alloc['net'] < 1.0) & (datanode_alloc['blacklisted'] == 0)]
   candidate_nodes_net = spare_throughput.sort_values(by='net', ascending=False).loc[:, 'net']
 
+  print("Candidate nodes net: ", candidate_nodes_net)
+  print("Candidate nodes capacity: ", candidate_nodes_capacity)
+
   # If throughput bound, will allocate nodes based on CPU and network demand 
   if throughput_bound:
     job_net_weight_allocated = 0  # as a fraction of NODE_Mbps
@@ -328,39 +331,46 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     #       that should go to each node 
     for node in candidate_nodes_net.index: 
       if node not in candidate_nodes_capacity.index:
-        print("Node candidate ", node, " with spare net does not have sufficient storage tier capacity required, so skip it.\n")
+        #print("Node candidate ", node, " with spare net does not have sufficient storage tier capacity required, so skip it.\n")
         continue
       net = candidate_nodes_net[node]
       capacity = candidate_nodes_capacity[node]
       #print("net for node {} is {}".format(node, net))
       if net == 1.0:
         continue
-      corresponding_capacity_alloc = node_net_alloc * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
       if job_net_weight_req - job_net_weight_allocated >= 1 - net: 
         node_net_alloc = 1 - net
+        corresponding_capacity_alloc = node_net_alloc * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
+        print("throughput-bound if 1")
         # check if enough capacity on this node (assume uniform data access, so all data is equally hot)
-        if capacity < corresponding_capacity_alloc:
-          capacity_avail = 1 - capacity
+        capacity_avail = 1 - capacity
+        if capacity_avail < corresponding_capacity_alloc:
+          print("throughput-bound if 1.1 -- lack capacity")
           corresponding_net_alloc = capacity_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           job_net_weight_allocated += corresponding_net_alloc
           wmask.append((node, corresponding_net_alloc)) 
-          datanode_alloc.at[node,'net'] += corresonding_net_alloc #FIXME: check this!!!!
+          datanode_alloc.at[node,'net'] += corresonding_net_alloc 
           incr_datanode_alloc_capacity(node, capacity_avail, latency_sensitive)
         else:
+          print("throughput-bound if 1.1 else")
           job_net_weight_allocated += node_net_alloc
           wmask.append((node, node_net_alloc)) 
           datanode_alloc.at[node,'net'] = 1.0
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive)
       elif job_net_weight_req - job_net_weight_allocated < 1 - net:
+        print("throughput-bound elif 2")
         node_net_alloc = (job_net_weight_req - job_net_weight_allocated)
-        if capacity < corresponding_capacity_alloc:
-          capacity_avail = 1 - capacity
+        corresponding_capacity_alloc = node_net_alloc * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
+        capacity_avail = 1 - capacity
+        if capacity_avail < corresponding_capacity_alloc:
+          print("throughput-bound elif 2.1")
           corresponding_net_alloc = capacity_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           job_net_weight_allocated += corresponding_net_alloc
           wmask.append((node, corresponding_net_alloc)) 
           datanode_alloc.at[node,'net'] += corresponding_net_alloc
           incr_datanode_alloc_capacity(node, capacity_avail, latency_sensitive)
         else:
+          print("throughput-bound elif 2.2")
           job_net_weight_allocated += node_net_alloc 
           wmask.append((node, node_net_alloc))
           datanode_alloc.at[node,'net'] += node_net_alloc
@@ -420,36 +430,44 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     #       later, we will scale job weights based on fraction of job's data
     #       that should go to each node 
     for node in candidate_nodes_capacity.index: 
+      if node not in candidate_nodes_net.index:
+        #print("Node candidate ", node, " with spare capacity does not have sufficient throughput, so skip it.\n")
+        continue
       net = candidate_nodes_net[node]
       capacity = candidate_nodes_capacity[node]
-      if net == 1.0:
-        continue
-      corresponding_net_alloc = nodeGB_alloc * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
       if jobGB_weight_req - jobGB_weight_allocated >= 1 - capacity: 
         nodeGB_alloc = 1 - capacity
+        corresponding_net_alloc = nodeGB_alloc * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
+        print("capacity-bound if 1")
         # check if enough throughput on this node (assume uniform data access, so all data is equally hot)
-        if net < corresponding_net_alloc:
-          net_avail = 1 - net
+        net_avail = 1 - net
+        if net_avail < corresponding_net_alloc:
+          print("capacity-bound if 1.1")
           corresponding_capacity_alloc = net_avail * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
           jobGB_weight_allocated += corresponding_capacity_alloc
           wmask.append((node, corresponding_capacity_avail)) 
           datanode_alloc.at[node,'net'] += net_avail
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive) 
         else:
+          print("capacity-bound if 1.2")
           job_net_weight_allocated += nodeGB_alloc
           wmask.append((node, nodeGB_alloc)) 
-          datanode_alloc.at[node,'net'] = corresponding_net_alloc
+          datanode_alloc.at[node,'net'] += net_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           incr_datanode_alloc_capacity(node, nodeGB_alloc, latency_sensitive)
       elif jobGB_weight_req - jobGB_weight_allocated < 1 - capacity:
+        print("capacity-bound if 2")
         nodeGB_alloc = (jobGB_weight_req - jobGB_weight_allocated)
-        if net < corresponding_net_alloc:
-          net_avail = 1 - net
+        corresponding_net_alloc = nodeGB_alloc * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
+        net_avail = 1 - net
+        if net_avail < corresponding_net_alloc:
+          print("capacity-bound if 2.1")
           corresponding_capacity_alloc = net_avail * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
           jobGB_weight_allocated += corresponding_capacity_alloc
           wmask.append((node, corresponding_capacity_alloc)) 
           datanode_alloc.at[node,'net'] += net_avail 
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive)
         else:
+          print("capacity-bound if 2.2")
           jobGB_weight_allocated += nodeGB_alloc 
           wmask.append((node, nodeGB_alloc))
           datanode_alloc.at[node,'net'] += corresponding_net_alloc
@@ -474,7 +492,6 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
         new_node_weights = [1.0 for i in range(0, int(extra_nodes_needed))]
         new_node_weights.append(last_weight)
       parallelism = math.ceil(extra_nodes_needed)
-      global waitnodes
       waitnodes = parallelism
       print("KUBERNETES: launch {} extra nodes, wait for them to come up and assing proper weights {}"\
               .format(parallelism, new_node_weights))
