@@ -111,6 +111,11 @@ job_table = pd.DataFrame(columns=['jobid',
 				  'wmask', 
 				  'wmask_str']).set_index('jobid')
 
+# store job ids and their associated datanode weights, used to free node resources when deregister job
+job_datanode_net_allocations = {} 
+job_datanode_dramGB_allocations = {} 
+job_datanode_flashGB_allocations = {} 
+
 # keep track of each storage server's CPU and network utilization
 datanode_usage = pd.DataFrame(columns=['datanodeip_port',
 				       'cpu', 
@@ -275,6 +280,7 @@ def incr_datanode_alloc_capacity(node, capacity, latency_sensitive):
 @asyncio.coroutine
 def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   print("generate weightmask for ", jobid, jobGB, jobMbps, latency_sensitive)
+  print(datanode_alloc)
   wmask = []
   # Step 1: determine if capacity or throughput bound
   if latency_sensitive:  
@@ -300,14 +306,14 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
     jobGB_weight_req = jobGB * 1.0 / DRAM_NODE_GB
     NODE_CAPACITY = DRAM_NODE_GB
     spare_capacity = datanode_alloc.loc[(datanode_alloc['DRAM_GB'] < 1.0) & \
-					(datanode_alloc['DRAM_GB'] > 0.0) & \
+					(datanode_alloc['DRAM_GB'] >= 0.0) & \
 					(datanode_alloc['blacklisted'] == 0)]
     candidate_nodes_capacity = spare_capacity.sort_values(by='DRAM_GB', ascending=False).loc[:, 'DRAM_GB']
   else:
     jobGB_weight_req = jobGB * 1.0 / FLASH_NODE_GB
     NODE_CAPACITY = FLASH_NODE_GB
     spare_capacity = datanode_alloc.loc[(datanode_alloc['Flash_GB'] < 1.0) & \
-					(datanode_alloc['Flash_GB'] > 0.0) & \
+					(datanode_alloc['Flash_GB'] >= 0.0) & \
 					(datanode_alloc['blacklisted'] == 0)]
     candidate_nodes_capacity = spare_capacity.sort_values(by='Flash_GB', ascending=False).loc[:, 'Flash_GB']
 
@@ -349,12 +355,12 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
           corresponding_net_alloc = capacity_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           job_net_weight_allocated += corresponding_net_alloc
           wmask.append((node, corresponding_net_alloc)) 
-          datanode_alloc.at[node,'net'] += corresonding_net_alloc 
+          datanode_alloc.at[node,'net'] += corresponding_net_alloc 
           incr_datanode_alloc_capacity(node, capacity_avail, latency_sensitive)
         else:
           print("throughput-bound if 1.1 else")
           job_net_weight_allocated += node_net_alloc
-          wmask.append((node, node_net_alloc)) 
+          wmask.append((node, 1.0)) 
           datanode_alloc.at[node,'net'] = 1.0
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive)
       elif job_net_weight_req - job_net_weight_allocated < 1 - net:
@@ -445,12 +451,12 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
           print("capacity-bound if 1.1")
           corresponding_capacity_alloc = net_avail * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY)
           jobGB_weight_allocated += corresponding_capacity_alloc
-          wmask.append((node, corresponding_capacity_avail)) 
+          wmask.append((node, corresponding_capacity_alloc)) 
           datanode_alloc.at[node,'net'] += net_avail
           incr_datanode_alloc_capacity(node, corresponding_capacity_alloc, latency_sensitive) 
         else:
           print("capacity-bound if 1.2")
-          job_net_weight_allocated += nodeGB_alloc
+          jobGB_weight_allocated += nodeGB_alloc
           wmask.append((node, nodeGB_alloc)) 
           datanode_alloc.at[node,'net'] += net_avail * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps)
           incr_datanode_alloc_capacity(node, nodeGB_alloc, latency_sensitive)
@@ -517,6 +523,26 @@ def generate_weightmask(jobid, jobGB, jobMbps, latency_sensitive):
   # e.g., if a throughput-bound job needs 7 Gb/s and all assigned to 1 node
   #       currently, wmask has a weight of 0.85, which is the fraction of NODE_Mbps the job consumes
   #       but wmask for the job should be 1 because all the data is going to one node.
+  # first save the datanode allocation weights to make it easier to deregister job later
+  if throughput_bound:
+    job_datanode_net_allocations[jobid] = wmask.copy() 
+    print("job_datanode_net wmask:", job_datanode_net_allocations[jobid])
+    corresponding_capacity_alloc_wmask = [ (x[0], float(x[1] * NODE_Mbps * jobGB / (jobMbps * NODE_CAPACITY))) for x in wmask]
+    print("corresponding_capacity_alloc wmask:", corresponding_capacity_alloc_wmask)
+    if latency_sensitive:
+      job_datanode_dramGB_allocations[jobid] = corresponding_capacity_alloc_wmask 
+    else:
+      job_datanode_flashGB_allocations[jobid] = corresponding_capacity_alloc_wmask 
+
+  else:
+    corresponding_net_alloc_wmask = [ (x[0], float(x[1] * NODE_CAPACITY * jobMbps / (jobGB * NODE_Mbps))) for x in wmask]
+    print("corresponding_capacity_alloc wmask:", corresponding_net_alloc_wmask)
+    job_datanode_net_allocations[jobid] = corresponding_net_alloc_wmask 
+    if latency_sensitive:
+      job_datanode_dramGB_allocations[jobid] = wmask.copy() 
+    else:
+      job_datanode_flashGB_allocations[jobid] = wmask.copy() 
+
   job_wmask = []
   weight_sum = sum([x[1] for x in wmask]) 
   for idx, (datanodeip_port, weight) in enumerate(wmask):
@@ -653,8 +679,30 @@ def handle_deregister_job(reader, writer):
   
   print("------------------------- DEREGISTER JOB --------------------------------", time.time())
   # clear weight of this job
-  for (datanodeip_port, weight) in job_table.loc[jobid,'wmask_str']:
-    datanode_alloc.at[datanodeip_port, 'net'] =  datanode_alloc.at[datanodeip_port, 'net'] - weight
+  if jobid not in job_datanode_net_allocations:
+    print("ERROR: job to deregister no net allocation recognized!\n")
+    print(job_datanode_net_allocations)
+  for (datanodeip_port, weight) in job_datanode_net_allocations[jobid]:
+    datanode_alloc.at[datanodeip_port, 'net'] -= weight
+    if datanode_alloc.at[datanodeip_port, 'net'] < 0.0: # could happen due to rounding
+      datanode_alloc.at[datanodeip_port, 'net'] = 0.0
+  if jobid in job_datanode_dramGB_allocations:
+    for (datanodeip_port, weight) in job_datanode_dramGB_allocations[jobid]:
+      datanode_alloc.at[datanodeip_port, 'DRAM_GB'] -= weight
+      if datanode_alloc.at[datanodeip_port, 'DRAM_GB'] < 0.0: # could happen due to rounding
+        datanode_alloc.at[datanodeip_port, 'DRAM_GB'] = 0.0
+  elif jobid in job_datanode_flashGB_allocations:
+    for (datanodeip_port, weight) in job_datanode_flashGB_allocations[jobid]:
+      datanode_alloc.at[datanodeip_port, 'Flash_GB'] -= weight
+      if datanode_alloc.at[datanodeip_port, 'Flash_GB'] < 0.0: # could happen due to rounding
+        datanode_alloc.at[datanodeip_port, 'Flash_GB'] = 0.0
+  else:
+    print("ERROR: job to deregister no capacity allocation recognized!\n")
+    print(job_datanode_dramGB_allocations)
+    print(job_datanode_flashGB_allocations)
+    
+#  for (datanodeip_port, weight) in job_table.loc[jobid,'wmask_str']:
+#    datanode_alloc.at[datanodeip_port, 'net'] =  datanode_alloc.at[datanodeip_port, 'net'] - weight
   # delete job from table
   err = remove_job(jobid)
   if err == 0:
@@ -666,6 +714,7 @@ def handle_deregister_job(reader, writer):
     pocket.delete(createdirsock, None, "/" + jobid)
     #pocket.close(createdirsock)
  
+  print(datanode_alloc)
  
   # reply to client with jobid int
   resp_packer = struct.Struct(RESP_STRUCT_FORMAT)
